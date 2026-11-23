@@ -190,6 +190,7 @@ def movies(only_files=False):
             "kind": "movie", "id": m.get("id"), "title": m.get("title"), "year": m.get("year"),
             "size_gb": gb(m.get("sizeOnDisk")), "tmdb": m.get("tmdbId"),
             "monitored": m.get("monitored"), "has_file": m.get("hasFile"),
+            "path": m.get("path"), "folder": m.get("folderName"),
         })
     return out
 
@@ -419,6 +420,92 @@ def _library():
             "retention": ds}
 
 
+AI_STATE = os.path.join(os.environ.get("STATE_DIR", "/var/lib/severino-panel"), "ai_subs.json")
+
+
+def _ai_load():
+    try:
+        return json.load(open(AI_STATE))
+    except Exception:
+        return {}
+
+
+def _ai_mark(path, cues, source):
+    d = _ai_load()
+    d[path] = {"at": int(time.time()), "cues": cues, "source": source}
+    os.makedirs(os.path.dirname(AI_STATE), exist_ok=True)
+    with open(AI_STATE, "w") as f:
+        json.dump(d, f)
+
+
+LANG2 = {"eng": "EN", "por": "PT", "spa": "ES", "fre": "FR", "ger": "DE", "ita": "IT",
+         "jpn": "JA", "kor": "KO", "chi": "ZH", "rus": "RU", "hin": "HI", "ara": "AR",
+         "dut": "NL", "pol": "PL", "tur": "TR", "swe": "SV", "dan": "DA", "nor": "NO",
+         "fin": "FI", "cze": "CS", "hun": "HU", "gre": "EL", "rum": "RO", "ukr": "UK"}
+
+
+def _subs_for(m):
+    """Faixas de legenda que o arquivo tem: embutidas (texto/imagem) + externas."""
+    try:
+        video = _movie_file(m)
+    except Exception:
+        return None
+    subs = []
+    try:
+        for s in _probe(video):
+            codec = (s.get("codec_name") or "").lower()
+            tags = s.get("tags") or {}
+            code = (tags.get("language") or "").lower()
+            title = (tags.get("title") or "").lower()
+            if codec in TEXT_CODECS:
+                label = LANG2.get(code, code.upper() or "??")
+                if "sdh" in title or "cc" in title:
+                    label += "·SDH"
+                subs.append(label)
+            elif "pgs" in codec or "vobsub" in codec or "dvd" in codec:
+                subs.append("IMAGEM")
+    except Exception:
+        pass
+    stem = os.path.splitext(os.path.basename(video))[0]
+    folder = os.path.dirname(video)
+    try:
+        for f in sorted(os.listdir(folder)):
+            low = f.lower()
+            if low.startswith(stem.lower() + ".") and low.endswith((".srt", ".ass", ".vtt")):
+                code = f[len(stem) + 1:].rsplit(".", 1)[0]
+                label = code.upper().replace("_", "-")
+                subs.append(label)
+    except OSError:
+        pass
+    ai_file = os.path.join(folder, stem + ".IA.pt-BR.srt")
+    ai = _ai_load().get(video) or ({"at": int(os.path.getmtime(ai_file))} if os.path.exists(ai_file) else None)
+    seen, out = set(), []
+    for x in subs:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    has_pt = any(s.startswith("PT") for s in out)
+    return {"file": video, "subs": out, "ai": bool(ai), "has_pt": has_pt,
+            "ai_at": (ai or {}).get("at")}
+
+
+def subtitles_catalog():
+    def build():
+        items = []
+        for m in movies():
+            if not m.get("has_file"):
+                continue
+            info = _subs_for(m)
+            if info is None:
+                continue
+            items.append({"id": m["id"], "title": m["title"], "year": m["year"],
+                          "size_gb": m["size_gb"], "subs": info["subs"], "ai": info["ai"],
+                          "has_pt": info["has_pt"], "ai_at": info["ai_at"]})
+        items.sort(key=lambda x: (x["has_pt"], -x["size_gb"]))
+        return {"items": items}
+    return cached("subtitles_catalog", 60, build)
+
+
 def subtitles():
     out = []
     try:
@@ -498,11 +585,12 @@ def _probe(path):
 
 
 def _movie_file(movie):
-    """Arquivo de vídeo do filme (o Radarr sabe o caminho)."""
-    folder = movie.get("folderName") or ""
-    base = os.path.join("/DATA/Media/Movies", folder)
-    if not os.path.isdir(base):
-        base = movie.get("path") or base
+    """Arquivo de vídeo do filme. O Radarr responde com caminhos do container (/data/...)."""
+    base = movie.get("path") or movie.get("folder") or ""
+    if base.startswith("/data/"):
+        base = "/DATA/" + base[len("/data/"):]     # caminho do container -> caminho do host
+    if not base or not os.path.isdir(base):
+        raise RuntimeError("pasta do filme não encontrada: %r" % base)
     for root, _d, files in os.walk(base):
         for f in files:
             if f.lower().endswith((".mkv", ".mp4", ".avi", ".m4v")):
@@ -761,9 +849,15 @@ def _job_run(job, movie_id):
                  offset_s=round(offset, 2), offset_conf=conf)
         out = _translate(cues, ctx, lambda p: _job_set(job, pct=p))
         stem = os.path.splitext(video)[0]
-        dst = stem + ".pt-BR.srt"
+        # Jellyfin lê "<titulo>.<idioma>.srt": assim a faixa aparece como "IA - Portuguese"
+        dst = stem + ".IA.pt-BR.srt"
         _job_set(job, pct=97, step="gravando " + os.path.basename(dst))
         _write_srt(out, dst)
+        try:
+            _ai_mark(video, len(out), src["kind"])
+        except Exception:
+            pass
+        _CACHE.pop("subtitles_catalog", None)
         try:
             jellyfin("/Library/Refresh", method="POST")
         except Exception:
@@ -828,7 +922,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/library":
                 return self._send(200, library())
             if path == "/subtitles":
-                return self._send(200, subtitles())
+                return self._send(200, subtitles_catalog())
             if path == "/recycle":
                 return self._send(200, recycle_info())
             if path.startswith("/jobs/"):

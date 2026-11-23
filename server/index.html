@@ -108,7 +108,7 @@ function render(force) {
   const sig = JSON.stringify([tab,
     data.requests.map(r => [r.id, r.state, r.pct, r.eta]),
     data.library.map(i => [i.id, i.watched, i.delete_in_days, i.size_gb]),
-    data.subs.map(x => x.id), data.recycle.gb]);
+    data.subs.map(x => [x.id, x.ai, (x.subs || []).length]), data.recycle.gb]);
   if (!force && sig === lastSig) return;   // nada mudou: não re-renderiza (não rouba o foco)
   lastSig = sig;
   const keep = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.fkey : null;
@@ -140,10 +140,12 @@ function render(force) {
   } else {
     l.innerHTML = data.subs.length ? data.subs.map(x => `
       <div class="item" tabindex="0" data-fkey="sub-${x.id}">
-        <div class="t"><b>${x.title}</b><small>${x.year || ""} · sem ${x.missing.join(", ")}</small></div>
-        <button class="act" data-hold="1" data-fkey="subact-${x.id}" data-sub="${x.id}">Segure: buscar</button>
-        <button class="act" data-hold="1" data-ai="${x.id}" data-fkey="ai-${x.id}">Segure: gerar IA</button>
-      </div>`).join("") : `<div class="empty">todas as legendas em dia</div>`;
+        <div class="t"><b>${x.title}</b>
+          <small>${x.year || ""} · ${(x.subs || []).length ? (x.subs || []).join(" · ") : "sem legenda"}</small>
+          ${x.ai ? `<small style="color:#34c759">legenda IA disponível</small>` : ""}</div>
+        <button class="act" data-fkey="bz-${x.id}" data-sub="${x.id}">Buscar</button>
+        <button class="act" data-fkey="ai-${x.id}" data-ai="${x.id}">${x.ai ? "Regenerar IA" : "Gerar IA"}</button>
+      </div>`).join("") : `<div class="empty">nenhum filme com legenda no catálogo</div>`;
   }
   const again = keep ? document.querySelector(`[data-fkey="${keep}"]`) : null;
   (again || l.querySelector(".item") || document.querySelector(".tab.on")).focus();
@@ -273,6 +275,13 @@ window.__seerrNav = function (cmd) {
     nav(cmd); return "move";
   } catch (e) { return "err"; }
 };
+
+// Um toque: o wrapper entrega OK como click no key-up, então a ação roda direto.
+document.addEventListener("click", e => {
+  const b = e.target.closest("button[data-ai],button[data-sub]");
+  if (!b) return;
+  run(b);
+});
 
 // Browsers (TV Bro) mandam keydown/keyup de verdade.
 document.addEventListener("keydown", e => {

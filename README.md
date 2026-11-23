@@ -44,6 +44,13 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 A URL do painel já vem preenchida em `SetupActivity`.
 
+## Aba Legendas = catálogo
+
+A aba lista **todos os filmes da biblioteca** com as faixas que o arquivo realmente tem (embutidas e externas:
+`EN · EN·SDH · IMAGEM · PT-BR · PT`), mais `Buscar` (Bazarr) e `Gerar IA` / `Regenerar IA` — **um toque**, sem
+segurar. A legenda gerada é gravada como `"<video>.IA.pt-BR.srt"`: o Jellyfin lê o nome como
+`<título>.<idioma>.srt`, então a faixa aparece como **"IA - Portuguese"** e dá para reconhecer a gerada.
+
 ## Legendas com IA
 
 Botão **"Segure: gerar IA"** na aba Legendas:
