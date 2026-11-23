@@ -103,7 +103,14 @@ async function load() {
   loading = false;
 }
 
-function render() {
+let lastSig = "";
+function render(force) {
+  const sig = JSON.stringify([tab,
+    data.requests.map(r => [r.id, r.state, r.pct, r.eta]),
+    data.library.map(i => [i.id, i.watched, i.delete_in_days, i.size_gb]),
+    data.subs.map(x => x.id), data.recycle.gb]);
+  if (!force && sig === lastSig) return;   // nada mudou: não re-renderiza (não rouba o foco)
+  lastSig = sig;
   const keep = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.fkey : null;
   const l = $("#list");
   if (tab === "requests") {
@@ -124,7 +131,9 @@ function render() {
       </div>` : "";
     l.innerHTML = bin + (data.library.length ? data.library.map(i => `
       <div class="item" tabindex="0" data-fkey="lib-${i.id}">
-        <div class="t"><b>${i.title}</b><small>${i.kind === "movie" ? "filme" : "série"} · ${i.year || ""}</small></div>
+        <div class="t"><b>${i.title}</b>
+          <small>${i.kind === "movie" ? "filme" : "série"} · ${i.year || ""}${
+            i.watched ? ` · assistido há ${i.watched_days}d → sai em ${i.delete_in_days}d` : ""}</small></div>
         <span class="pill">${fmt(i.size_gb)}</span>
         <button class="act danger" data-hold="1" data-fkey="del-${i.id}" data-kind="${i.kind}" data-id="${i.id}">Segure: excluir</button>
       </div>`).join("") : `<div class="empty">biblioteca vazia</div>`);
@@ -252,7 +261,7 @@ document.addEventListener("keyup", e => {
 });
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
-  t.classList.add("on"); tab = t.dataset.tab; render();
+  t.classList.add("on"); tab = t.dataset.tab; render(true);
 });
 
 // ---------- atualização ----------
@@ -268,8 +277,8 @@ async function pollEvents() {
   } catch (e) {}
 }
 load();
-setInterval(load, 10000);        // status/progresso a cada 10 s
-setInterval(pollEvents, 5000);   // webhook do Radarr/Sonarr -> reflexo em até 5 s
+setInterval(load, 2000);         // status/progresso a cada 2 s
+setInterval(pollEvents, 2000);   // webhook do Radarr/Sonarr -> reflexo em até 2 s
 </script>
 </body>
 </html>

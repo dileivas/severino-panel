@@ -42,6 +42,8 @@ def load_conf(path):
 CONF_VALUES = load_conf(CONF)
 JELLYFIN = CONF_VALUES.get("JELLYFIN_URL", "http://127.0.0.1:8097")
 JELLYFIN_USER = CONF_VALUES.get("JELLYFIN_USER_ID", "")
+# A rotina deletewatchedarr olha o histórico DESTE usuário do Jellyfin
+WATCH_USER = CONF_VALUES.get("JELLYFIN_WATCH_USER_ID", JELLYFIN_USER)
 RADARR = CONF_VALUES.get("RADARR_URL", "http://127.0.0.1:7878")
 SONARR = CONF_VALUES.get("SONARR_URL", "http://127.0.0.1:8989")
 SEERR = CONF_VALUES.get("SEERR_URL", "http://127.0.0.1:5055")
@@ -99,6 +101,68 @@ def bazarr_form(path, form):
                                           "Content-Type": "application/x-www-form-urlencoded"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.status
+
+
+_CACHE = {}
+
+
+def cached(key, ttl, fn):
+    hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    val = fn()
+    _CACHE[key] = (time.time(), val)
+    return val
+
+
+def delete_settings():
+    """A rotina deletewatchedarr: retenção (dias) e se está em dry-run."""
+    out = {"movie_days": None, "episode_days": None, "dry_run": True, "interval": None}
+    path = os.path.join(os.path.dirname(RECYCLE.rstrip("/")), "deletewatchedarr", "config.yaml")
+    try:
+        with open(path) as f:
+            for line in f:
+                k, _, v = line.partition(":")
+                k, v = k.strip(), v.strip()
+                try:
+                    if k == "movie_retention_days":
+                        out["movie_days"] = int(v)
+                    elif k == "episode_retention_days":
+                        out["episode_days"] = int(v)
+                    elif k == "dry_run":
+                        out["dry_run"] = v.lower() == "true"
+                    elif k == "interval_minutes":
+                        out["interval"] = int(v)
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+def watched_map():
+    """TMDB id -> {played, days since last play}, do Jellyfin (o que o deletewatchedarr lê)."""
+    out = {}
+    try:
+        d = jellyfin("/Items", IncludeItemTypes="Movie", Recursive="true", Fields="ProviderIds,UserData",
+                     UserId=WATCH_USER, Limit=1000)
+        for it in (d or {}).get("Items", []):
+            ud = it.get("UserData") or {}
+            tmdb = (it.get("ProviderIds") or {}).get("Tmdb")
+            if not tmdb:
+                continue
+            last = ud.get("LastPlayedDate")
+            days = None
+            if last:
+                try:
+                    t = time.mktime(time.strptime(last[:19], "%Y-%m-%dT%H:%M:%S"))
+                    days = int((time.time() - t) // 86400)
+                except Exception:
+                    days = None
+            out[str(tmdb)] = {"played": bool(ud.get("Played")), "days": days}
+    except Exception:
+        pass
+    return out
 
 
 def gb(n):
@@ -182,6 +246,10 @@ RADARR_Q = {"downloading": "baixando", "importPending": "importando", "imported"
 
 
 def requests():
+    return cached("requests", 2, _requests)
+
+
+def _requests():
     try:
         d = seerr("/api/v1/request?take=40&sort=added")
     except Exception as e:
@@ -226,7 +294,7 @@ def requests():
         elif r.get("status") == 3:
             state = "recusado"
         elif key not in local:
-            state = "pedido antigo (não está no Radarr)"
+            continue   # pedido sem mídia no Radarr: já foi apagado, não polui a lista
         else:
             state = "monitorado, sem release"
         out.append({"id": r.get("id"), "tmdb": tmdb, "type": mt, "title": title,
@@ -274,6 +342,10 @@ def purge_recycle():
 
 
 def overview():
+    return cached("overview", 2, _overview)
+
+
+def _overview():
     d = disk()
     lib = [m for m in movies(only_files=True)]
     biggest = sorted(lib, key=lambda m: m["size_gb"] or 0, reverse=True)[:8]
@@ -311,6 +383,10 @@ def overview():
                            "image": f"{JELLYFIN}/Items/{it.get('Id')}/Images/Primary?maxHeight=300"})
     except Exception:
         pass
+    ds = delete_settings()
+    if ds.get("dry_run") and ds.get("movie_days") is not None:
+        alerts.append({"level": "info",
+                       "text": f"exclusão automática em DRY-RUN (não apaga) · retenção {ds['movie_days']}d"})
     rec = recycle_info()
     if rec["gb"] >= 1:
         alerts.append({"level": "info", "text": f"lixeira: {rec['gb']} GB — dá para esvaziar"})
@@ -320,9 +396,24 @@ def overview():
 
 
 def library():
+    return cached("library", 10, _library)
+
+
+def _library():
+    ds = delete_settings()
+    wm = cached("watched", 60, watched_map)
     items = [m for m in movies() if m.get("has_file")] + series()
-    items.sort(key=lambda x: x.get("size_gb") or 0, reverse=True)
-    return {"items": items, "total_gb": round(sum(i.get("size_gb") or 0 for i in items), 1)}
+    for it in items:
+        if it.get("kind") != "movie":
+            continue
+        w = wm.get(str(it.get("tmdb"))) or {}
+        it["watched"] = w.get("played", False)
+        it["watched_days"] = w.get("days")
+        if it["watched"] and ds["movie_days"] is not None and w.get("days") is not None:
+            it["delete_in_days"] = max(0, ds["movie_days"] - w["days"])
+    items.sort(key=lambda x: (not x.get("watched", False), -(x.get("size_gb") or 0)))
+    return {"items": items, "total_gb": round(sum(i.get("size_gb") or 0 for i in items), 1),
+            "retention": ds}
 
 
 def subtitles():
