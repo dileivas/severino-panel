@@ -66,7 +66,7 @@
 <script>
 const TOKEN = "__PANEL_TOKEN__";
 const H = { "X-Panel-Token": TOKEN, "Content-Type": "application/json" };
-let tab = "requests", data = { requests: [], library: [], subs: [] }, eventsAt = 0, loading = false;
+let tab = "requests", data = { requests: [], library: [], subs: [], recycle: { gb: 0 } }, eventsAt = 0, loading = false;
 
 const $ = s => document.querySelector(s);
 const fmt = gb => (gb >= 10 ? Math.round(gb) : (gb || 0).toFixed(1)) + " GB";
@@ -91,6 +91,7 @@ async function load() {
     $("#alerts").innerHTML = (o.alerts || []).map(a =>
       `<span class="chip ${a.level === "info" ? "amber" : a.level}">${a.text}</span>`).join("");
     data.requests = o.requests || [];
+    data.recycle = o.recycle || { gb: 0 };
     const [lib, subs] = await Promise.all([
       fetch("/library", { cache: "no-store" }).then(r => r.json()),
       fetch("/subtitles", { cache: "no-store" }).then(r => r.json())]);
@@ -116,12 +117,17 @@ function render() {
         ${pill(r.state)}
       </div>`).join("") : `<div class="empty">nenhum pedido</div>`;
   } else if (tab === "library") {
-    l.innerHTML = data.library.length ? data.library.map(i => `
+    const bin = data.recycle && data.recycle.gb >= 1 ? `
+      <div class="item" tabindex="0" data-fkey="bin">
+        <div class="t"><b>Lixeira</b><small>${fmt(data.recycle.gb)} em arquivos excluídos — o espaço só volta ao esvaziar</small></div>
+        <button class="act danger" data-hold="1" data-fkey="purge" data-purge="1">Segure: esvaziar</button>
+      </div>` : "";
+    l.innerHTML = bin + (data.library.length ? data.library.map(i => `
       <div class="item" tabindex="0" data-fkey="lib-${i.id}">
         <div class="t"><b>${i.title}</b><small>${i.kind === "movie" ? "filme" : "série"} · ${i.year || ""}</small></div>
         <span class="pill">${fmt(i.size_gb)}</span>
         <button class="act danger" data-hold="1" data-fkey="del-${i.id}" data-kind="${i.kind}" data-id="${i.id}">Segure: excluir</button>
-      </div>`).join("") : `<div class="empty">biblioteca vazia</div>`;
+      </div>`).join("") : `<div class="empty">biblioteca vazia</div>`);
   } else {
     l.innerHTML = data.subs.length ? data.subs.map(x => `
       <div class="item" tabindex="0" data-fkey="sub-${x.id}">
@@ -206,6 +212,14 @@ async function run(el) {
       if (!r.ok) throw new Error((await r.json()).error || r.status);
       toast("excluído — espaço liberado"); await load();
     } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Segure: excluir"; }
+  } else if (el.dataset.purge) {
+    el.textContent = "esvaziando…";
+    try {
+      const r = await fetch("/recycle/purge", { method: "POST", headers: H, body: "{}" });
+      if (!r.ok) throw new Error((await r.json()).error || r.status);
+      const d = await r.json();
+      toast("lixeira esvaziada — " + fmt(d.freed_gb) + " liberados"); await load();
+    } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Segure: esvaziar"; }
   } else if (el.dataset.sub) {
     el.textContent = "buscando…";
     try {

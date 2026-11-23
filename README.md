@@ -44,6 +44,11 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 A URL do painel já vem preenchida em `SetupActivity`.
 
+## Lixeira do Radarr
+
+O Radarr manda o arquivo para `recycle/` em vez de apagar: o espaço **só volta ao esvaziar**. O painel mostra o
+tamanho e oferece "Segure: esvaziar" (13,8 GB liberados na primeira vez). `RECYCLE_PATH` no `keys.env`.
+
 ## Atualização
 
 - A página recarrega a cada **10 s** (progresso/ETA vêm da fila do Radarr/Sonarr).

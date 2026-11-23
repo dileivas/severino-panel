@@ -10,6 +10,7 @@ Escrita (exige X-Panel-Token): POST /request, /delete, /subtitles/search, /hook/
 
 import json
 import os
+import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -46,6 +47,7 @@ SONARR = CONF_VALUES.get("SONARR_URL", "http://127.0.0.1:8989")
 SEERR = CONF_VALUES.get("SEERR_URL", "http://127.0.0.1:5055")
 BAZARR = CONF_VALUES.get("BAZARR_URL", "http://127.0.0.1:6767")
 DISK_PATH = CONF_VALUES.get("DISK_PATH", "/DATA")
+RECYCLE = CONF_VALUES.get("RECYCLE_PATH", "/DATA/AppData/arr-stack/recycle")
 SUBTITLE_LANG = CONF_VALUES.get("SUBTITLE_LANG", "pb")   # Bazarr calls it "pb" (Portuguese, Brazil)
 SUBTITLE_MATCH = {"pb", "pt-br", "pt", "pob"}
 
@@ -87,6 +89,16 @@ def seerr(path, method="GET", body=None):
 
 def bazarr(path, method="GET", body=None):
     return api(BAZARR, path, CONF_VALUES.get("BAZARR_KEY", ""), header="X-API-KEY", method=method, body=body)
+
+
+def bazarr_form(path, form):
+    """Bazarr's subtitle search is PATCH with form fields, not JSON."""
+    data = urllib.parse.urlencode(form).encode()
+    req = urllib.request.Request(BAZARR.rstrip("/") + path, data=data, method="PATCH",
+                                 headers={"X-API-KEY": CONF_VALUES.get("BAZARR_KEY", ""),
+                                          "Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.status
 
 
 def gb(n):
@@ -175,11 +187,12 @@ def requests():
     except Exception as e:
         return {"error": str(e), "items": []}
     # A fila do Radarr/Sonarr traz o id local (movieId/seriesId), não o TMDB: monta os dois sentidos.
-    local = {}
+    local, has_file = {}, {}
     try:
         for m in movies():
             if m.get("tmdb"):
                 local[("movie", m["tmdb"])] = m["id"]
+                has_file[("movie", m["tmdb"])] = bool(m.get("has_file"))
         for s in series():
             if s.get("tmdb"):
                 local[("series", s["tmdb"])] = s["id"]
@@ -192,29 +205,72 @@ def requests():
         elif q["kind"] == "series" and q.get("sonarr_id") is not None:
             by_id[("series", q["sonarr_id"])] = q
     out = []
+    include_declined = False   # pedidos recusados são histórico: fora da lista da TV
     for r in (d or {}).get("results", []):
+        if r.get("status") == 3 and not include_declined:
+            continue
         media = r.get("media") or {}
         tmdb = media.get("tmdbId")
         mt = (media.get("mediaType") or "movie")
         title = media.get("title") or media.get("name") or media.get("originalTitle") or seerr_title(tmdb, mt)
         state, pct, eta, size, err = None, None, None, None, None
-        q = by_id.get((mt, local.get((mt, tmdb))))
+        key = (mt, tmdb)
+        q = by_id.get((mt, local.get(key)))
         if q:
             state = RADARR_Q.get(q["state"], q["state"])
             pct, eta, size, err = q["pct"], q["timeleft"], q["sizeleft_gb"], q["error"]
-        elif media.get("status") == 5:
+        elif has_file.get(key) or media.get("status") == 5:
             state = "disponível"
         elif r.get("status") == 1:
             state = "aguardando aprovação"
         elif r.get("status") == 3:
             state = "recusado"
+        elif key not in local:
+            state = "pedido antigo (não está no Radarr)"
         else:
-            state = "procurando release"
+            state = "monitorado, sem release"
         out.append({"id": r.get("id"), "tmdb": tmdb, "type": mt, "title": title,
                     "request": SEERR_STATUS.get(r.get("status")), "media": SEERR_MEDIA.get(media.get("status")),
                     "state": state, "pct": pct, "eta": eta, "sizeleft_gb": size, "error": err,
                     "at": r.get("createdAt")})
     return {"items": out}
+
+
+def du(path):
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def recycle_info():
+    return {"gb": gb(du(RECYCLE)) if os.path.isdir(RECYCLE) else 0.0}
+
+
+def purge_recycle():
+    freed = 0
+    if not os.path.isdir(RECYCLE):
+        return {"freed_gb": 0.0}
+    for kind in ("radarr", "sonarr"):
+        d = os.path.join(RECYCLE, kind)
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            p = os.path.join(d, name)
+            try:
+                if os.path.islink(p) or os.path.isfile(p):
+                    freed += os.path.getsize(p)
+                    os.remove(p)
+                elif os.path.isdir(p):
+                    freed += du(p)
+                    shutil.rmtree(p)
+            except OSError:
+                pass
+    return {"freed_gb": gb(freed)}
 
 
 def overview():
@@ -255,8 +311,12 @@ def overview():
                            "image": f"{JELLYFIN}/Items/{it.get('Id')}/Images/Primary?maxHeight=300"})
     except Exception:
         pass
+    rec = recycle_info()
+    if rec["gb"] >= 1:
+        alerts.append({"level": "info", "text": f"lixeira: {rec['gb']} GB — dá para esvaziar"})
     return {"disk": d, "alerts": alerts, "biggest": biggest, "library_gb": round(total_lib, 1),
-            "recent": recent, "resume": resume, "requests": requests().get("items", [])}
+            "recent": recent, "resume": resume, "recycle": rec,
+            "requests": requests().get("items", [])}
 
 
 def library():
@@ -295,10 +355,9 @@ def delete(kind, item_id, files):
 
 
 def subtitle_search(kind, item_id):
-    # Bazarr: pede a legenda que falta para o filme/série
-    body = {"radarrid": [item_id], "language": [SUBTITLE_LANG], "hi": "False", "forced": "False",
-            "original_format": "False", "tag": ""}
-    return bazarr("/api/movies/subtitles", method="POST", body=body)
+    code = bazarr_form("/api/movies/subtitles", {"radarrid": int(item_id), "language": SUBTITLE_LANG,
+                                                 "forced": "False", "hi": "False"})
+    return {"status": code}
 
 
 def add_event(kind, title):
@@ -351,6 +410,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, library())
             if path == "/subtitles":
                 return self._send(200, subtitles())
+            if path == "/recycle":
+                return self._send(200, recycle_info())
             if path == "/events":
                 since = int(dict(urllib.parse.parse_qsl(query)).get("since", 0))
                 return self._send(200, {"events": [e for e in EVENTS if e["at"] > since], "now": int(time.time())})
@@ -378,6 +439,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, delete(b.get("kind", "movie"), b["id"], b.get("files", True)))
             if path == "/subtitles/search":
                 return self._send(200, {"ok": True, "result": subtitle_search(b.get("kind", "movie"), b["id"])})
+            if path == "/recycle/purge":
+                return self._send(200, purge_recycle())
             return self._send(404, {"error": "not found"})
         except Exception as e:
             return self._send(500, {"error": str(e)})
