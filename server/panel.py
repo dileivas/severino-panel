@@ -279,14 +279,16 @@ def _requests():
         elif q["kind"] == "series" and q.get("sonarr_id") is not None:
             by_id[("series", q["sonarr_id"])] = q
     out = []
+    seen = set()               # a mesma série pode ter 2 pedidos (temporadas): mostra uma linha
     include_declined = False   # pedidos recusados são histórico: fora da lista da TV
     for r in (d or {}).get("results", []):
         if r.get("status") == 3 and not include_declined:
             continue
         media = r.get("media") or {}
         tmdb = media.get("tmdbId")
-        mt = (media.get("mediaType") or "movie")
-        title = media.get("title") or media.get("name") or media.get("originalTitle") or seerr_title(tmdb, mt)
+        shown_type = media.get("mediaType") or "movie"        # "movie" ou "tv" (para exibir)
+        mt = "series" if shown_type == "tv" else "movie"      # chave interna (Radarr/Sonarr)
+        title = media.get("title") or media.get("name") or media.get("originalTitle") or seerr_title(tmdb, shown_type)
         state, pct, eta, size, err = None, None, None, None, None
         key = (mt, tmdb)
         q = by_id.get((mt, local.get(key)))
@@ -303,7 +305,10 @@ def _requests():
             continue   # pedido sem mídia no Radarr: já foi apagado, não polui a lista
         else:
             state = "monitorado, sem release"
-        out.append({"id": r.get("id"), "tmdb": tmdb, "type": mt, "title": title,
+        if (mt, tmdb) in seen:
+            continue
+        seen.add((mt, tmdb))
+        out.append({"id": r.get("id"), "tmdb": tmdb, "type": shown_type, "title": title,
                     "request": SEERR_STATUS.get(r.get("status")), "media": SEERR_MEDIA.get(media.get("status")),
                     "state": state, "pct": pct, "eta": eta, "sizeleft_gb": size, "error": err,
                     "at": r.get("createdAt")})

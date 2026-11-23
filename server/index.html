@@ -65,6 +65,17 @@
   .item:focus { background:var(--card2); }
   .holding { background:#ff514733 !important; }
   .empty { color:var(--dim); padding:26px 4px; }
+  #confirm { position:fixed; inset:0; background:#000000bb; display:none; z-index:99;
+             align-items:center; justify-content:center; }
+  #confirm.on { display:flex; }
+  #confirm .box { background:var(--card); border:2px solid #ff514788; border-radius:20px;
+                  padding:30px 36px; max-width:860px; box-shadow:0 30px 80px #000a; }
+  #confirm h3 { margin:0 0 10px; font-size:28px; }
+  #confirm p { margin:0 0 24px; color:var(--dim); font-size:19px; }
+  #confirm .row { display:flex; gap:16px; justify-content:flex-end; }
+  #confirm button { font:600 19px/1 inherit; padding:15px 24px; border-radius:12px;
+                    border:2px solid #ffffff26; background:#ffffff0f; color:var(--ink); }
+  #confirm button.danger { border-color:#ff514788; color:#ffb4ae; }
   #toast { position:fixed; left:50%; bottom:44px; transform:translateX(-50%) translateY(24px);
            background:#1b2d45; border:2px solid #ffc70255; padding:16px 26px; border-radius:12px; opacity:0; transition:.2s; font-size:20px; }
   #toast.on { opacity:1; transform:translateX(-50%); }
@@ -87,6 +98,11 @@
   <button class="tab" data-tab="subs">Legendas</button>
 </div>
 <div id="list"></div>
+<div id="confirm"><div class="box">
+  <h3 id="cf-title">Excluir?</h3>
+  <p>Essa ação não tem desfazer.</p>
+  <div class="row"><button id="cf-no" data-fkey="cf-no">Cancelar</button><button id="cf-yes" class="danger" data-fkey="cf-yes">Excluir</button></div>
+</div></div>
 <div id="toast"></div>
 
 <script>
@@ -167,6 +183,21 @@ function tickClock() {
   const now = new Date();
   $("#clock").textContent = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
 }
+
+let confirmYes = null;
+function askConfirm(title, verb, onYes) {
+  confirmYes = onYes;
+  $("#cf-title").textContent = title;
+  $("#cf-yes").textContent = verb;
+  $("#confirm").classList.add("on");
+  $("#cf-no").focus();          // foco começa no CANCELAR: OK por engano não apaga
+}
+function closeConfirm() {
+  $("#confirm").classList.remove("on");
+  confirmYes = null;
+}
+$("#cf-no").onclick = () => closeConfirm();
+$("#cf-yes").onclick = () => { const f = confirmYes; closeConfirm(); if (f) f(); };
 
 let lastSig = "";
 function render(force) {
@@ -289,6 +320,17 @@ function activate() { release(); }
 
 async function run(el) {
   armOff();
+  // Excluir exige confirmação explícita (o foco vai para Cancelar).
+  if (el.dataset.kind && !el.dataset.confirmed) {
+    const item = el.closest(".item");
+    const name = item && item.querySelector("b") ? item.querySelector("b").textContent : "este título";
+    askConfirm("Excluir " + name + "?", "Excluir", () => { el.dataset.confirmed = "1"; run(el); });
+    return;
+  }
+  if (el.dataset.purge && !el.dataset.confirmed) {
+    askConfirm("Esvaziar a lixeira?", "Esvaziar", () => { el.dataset.confirmed = "1"; run(el); });
+    return;
+  }
   el.disabled = true;
   if (el.dataset.kind) {
     const kind = el.dataset.kind, id = Number(el.dataset.id);
@@ -343,6 +385,15 @@ async function run(el) {
 // A ponte do wrapper: DOWN do OK -> 'press', UP -> 'release' (ele não entrega keydown/keyup ao DOM).
 window.__seerrNav = function (cmd) {
   try {
+    if ($("#confirm").classList.contains("on")) {
+      if (cmd === "back") { closeConfirm(); return "goback"; }
+      if (cmd === "enter") { (document.activeElement || $("#cf-no")).click(); return "click"; }
+      if (/^(left|right|up|down)$/.test(cmd)) {
+        (document.activeElement === $("#cf-no") ? $("#cf-yes") : $("#cf-no")).focus();
+        return "move";
+      }
+      return "noop";
+    }
     if (cmd === "press") { return press() ? "hold" : "press"; }
     if (cmd === "release") { release(); return "release"; }
     if (cmd === "enter") { release(); return "click"; }          // compatibilidade
