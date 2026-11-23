@@ -16,10 +16,19 @@
   header { display:flex; align-items:center; gap:26px; margin-bottom:22px; }
   h1 { font-size:32px; font-weight:600; margin:0; display:flex; align-items:center; gap:12px; }
   h1 img { width:46px; height:46px; }
-  .stats { flex:1; display:flex; gap:18px; flex-wrap:wrap; align-items:center; }
-  .stat { min-width:132px; }
+  .stats { flex:1; min-width:0; display:flex; gap:18px; align-items:start; overflow:hidden; }
+  .stat { flex:0 0 auto; }
+  /* larguras fixas: nenhuma métrica muda de lugar quando o número cresce */
+  .stat:nth-child(1) { width:128px; }   /* RAM */
+  .stat:nth-child(2) { width:146px; }   /* Disco */
+  .stat:nth-child(3) { width:80px; }    /* CPU */
+  .stat:nth-child(4) { width:80px; }    /* Temp */
+  .stat.io { width:214px; }             /* IO (o mais longo) */
   .stat span { display:block; font-size:14px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); }
-  .stat b { display:block; font-size:22px; font-weight:600; margin-top:2px; }
+  .stat b { display:block; font-size:20px; font-weight:600; margin-top:2px; line-height:1.15;
+             white-space:nowrap; font-variant-numeric:tabular-nums;
+             overflow:hidden; text-overflow:ellipsis; }
+  .stat.io b { font-size:17px; }        /* o IO é o mais longo: fonte menor, mesma coluna */
   .stat .bar { margin-top:6px; }
   .bar { height:8px; border-radius:4px; background:#ffffff18; overflow:hidden; }
   .bar > i { display:block; height:100%; border-radius:4px; background:var(--green); transition:width .4s; }
@@ -68,7 +77,7 @@
   <div class="alerts" id="alerts"></div>
   <div class="side">
     <div class="clock" id="clock">--:--</div>
-    <div class="live" id="live"><i></i>ao vivo</div>
+    <div class="live" id="live"><i></i>online</div>
   </div>
 </header>
 
@@ -134,19 +143,17 @@ function tempColor(t) {
 }
 function renderHeader(o) {
   const d = o.disk || {}, h = o.host || {}, mem = h.mem || {}, cpu = h.cpu || {}, io = h.io || {};
-  const cont = (h.containers || {}).running;
   const mb = (v) => (v / 1024).toFixed(1);
   const parts = [
     { label: "RAM", value: mem.total_mb ? `${mb(mem.used_mb)} / ${Math.round(mem.total_mb / 1024)} GB` : "—",
       pct: mem.pct },
-    { label: "Disco", value: d.total_gb ? `${d.used_gb} / ${d.total_gb} GB` : "—", pct: d.pct },
+    { label: "Disco", value: d.total_gb ? `${Math.round(d.used_gb)} / ${Math.round(d.total_gb)} GB` : "—", pct: d.pct },
     { label: "CPU", value: cpu.pct != null ? Math.round(cpu.pct) + "%" : "—" },
     { label: "Temp", value: h.temp_c != null ? Math.round(h.temp_c) + "°" : "—", color: h.temp_c != null ? tempColor(h.temp_c) : null },
-    { label: "IO", value: io.read_kbs != null ? `↓${ioRate(io.read_kbs)} ↑${ioRate(io.write_kbs)}` : "—" },
-    { label: "Contêineres", value: cont >= 0 ? String(cont) : "—" },
+    { label: "IO", cls: "io", value: io.read_kbs != null ? `↓${ioRate(io.read_kbs)} ↑${ioRate(io.write_kbs)}` : "—" },
   ];
   $("#stats").innerHTML = parts.map(p => `
-    <div class="stat"><span>${p.label}</span>
+    <div class="stat ${p.cls || ""}"><span>${p.label}</span>
       <b style="${p.color ? "color:" + p.color : ""}">${p.value}</b>
       ${p.pct != null ? `<div class="bar"><i style="width:${Math.min(100, p.pct)}%;background:${barColor(p.pct)}"></i></div>` : ""}
     </div>`).join("");
@@ -154,7 +161,7 @@ function renderHeader(o) {
 function live(on) {
   const el = $("#live");
   el.classList.toggle("off", !on);
-  el.lastChild.textContent = on ? "ao vivo" : "offline";
+  el.lastChild.textContent = on ? "online" : "offline";
 }
 function tickClock() {
   const now = new Date();
