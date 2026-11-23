@@ -118,6 +118,15 @@ async function load(force) {
 function barColor(pct) {
   return pct >= 90 ? "var(--red)" : pct >= 80 ? "var(--amber)" : "var(--green)";
 }
+function ioRate(kbs) {   // escala automática: kB/s, MB/s ou GB/s
+  if (kbs == null || isNaN(kbs)) return "—";
+  if (kbs >= 1024 * 1024) return (kbs / 1048576).toFixed(1) + " GB/s";
+  if (kbs >= 1024) {
+    const mb = kbs / 1024;
+    return (mb < 10 ? mb.toFixed(2) : mb.toFixed(1)) + " MB/s";
+  }
+  return Math.round(kbs) + " kB/s";
+}
 function tempColor(t) {
   return t >= 80 ? "var(--red)" : t >= 70 ? "var(--amber)" : "var(--ink)";
 }
@@ -131,7 +140,7 @@ function renderHeader(o) {
     { label: "Disco", value: d.total_gb ? `${d.used_gb} / ${d.total_gb} GB` : "—", pct: d.pct },
     { label: "CPU", value: cpu.pct != null ? Math.round(cpu.pct) + "%" : "—" },
     { label: "Temp", value: h.temp_c != null ? Math.round(h.temp_c) + "°" : "—", color: h.temp_c != null ? tempColor(h.temp_c) : null },
-    { label: "IO", value: io.read_kbs != null ? `↓${Math.round(io.read_kbs)} ↑${Math.round(io.write_kbs)} kB/s` : "—" },
+    { label: "IO", value: io.read_kbs != null ? `↓${ioRate(io.read_kbs)} ↑${ioRate(io.write_kbs)}` : "—" },
     { label: "Contêineres", value: cont >= 0 ? String(cont) : "—" },
   ];
   $("#stats").innerHTML = parts.map(p => `
@@ -215,10 +224,20 @@ function nav(dir) {
   let ri = rs.findIndex(x => x.includes(document.activeElement));
   if (ri < 0) { (rs[0] || [])[0]?.focus(); return; }
   const ci = rs[ri].indexOf(document.activeElement);
-  if (dir === "right" && ci < rs[ri].length - 1) rs[ri][ci + 1].focus();
-  else if (dir === "left" && ci > 0) rs[ri][ci - 1].focus();
-  else if (dir === "down") rs[ri + 1]?.[0]?.focus();
-  else if (dir === "up") rs[ri - 1]?.[0]?.focus();
+  let target = null;
+  if (dir === "right" && ci < rs[ri].length - 1) target = rs[ri][ci + 1];
+  else if (dir === "left" && ci > 0) target = rs[ri][ci - 1];
+  else if (dir === "down") target = rs[ri + 1]?.[0];
+  else if (dir === "up") target = rs[ri - 1]?.[0];
+  if (!target) return;
+  // Subindo para a barra de abas, o foco vai para a ABA ATIVA (não a primeira).
+  if (dir === "up" && target.classList.contains("tab")) {
+    target = document.querySelector(".tab.on") || target;
+  }
+  target.focus();
+  // Na barra de abas volta ao topo (mostra o cabeçalho); nos itens, só o suficiente.
+  if (target.classList.contains("tab")) window.scrollTo({ top: 0, behavior: "smooth" });
+  else { try { target.scrollIntoView({ block: "nearest" }); } catch (e) {} }
 }
 
 // ---------- excluir/buscar: segurar OK 1,5 s OU OK duas vezes ----------
