@@ -219,6 +219,7 @@ def queue(kind):
         items.append({
             "kind": kind, "title": r.get("title") or media.get("title"),
             "tmdb": media.get("tmdbId"), "radarr_id": r.get("movieId"), "sonarr_id": r.get("seriesId"),
+            "season": r.get("seasonNumber") or (r.get("episode") or {}).get("seasonNumber"),
             "state": r.get("trackedDownloadState") or r.get("status"),
             "status": r.get("status"), "pct": round(100 - 100.0 * (r.get("sizeleft") or 0) / (r.get("size") or 1), 1),
             "sizeleft_gb": gb(r.get("sizeleft")), "timeleft": r.get("timeleft"), "error": r.get("errorMessage"),
@@ -272,46 +273,65 @@ def _requests():
                 local[("series", s["tmdb"])] = s["id"]
     except Exception:
         pass
-    by_id = {}
-    for q in queue("movie") + queue("series"):
-        if q["kind"] == "movie" and q.get("radarr_id") is not None:
-            by_id[("movie", q["radarr_id"])] = q
-        elif q["kind"] == "series" and q.get("sonarr_id") is not None:
-            by_id[("series", q["sonarr_id"])] = q
+    by_movie = {}
+    by_season = {}
+    for q in queue("movie"):
+        if q.get("radarr_id") is not None:
+            by_movie[q["radarr_id"]] = q
+    for q in queue("series"):
+        sid = q.get("sonarr_id")
+        if sid is None:
+            continue
+        key = (sid, q.get("season"))
+        if key in by_season:                     # vários episódios: soma tamanho, pior ETA, % ponderado
+            cur = by_season[key]
+            total = (cur.get("sizeleft_gb") or 0) + (q.get("sizeleft_gb") or 0)
+            cur["sizeleft_gb"] = round(total, 2)
+            if q.get("pct") is not None:
+                cur["pct"] = round(((cur.get("pct") or 0) + q["pct"]) / 2, 1)
+            if q.get("eta") and (not cur.get("eta") or q["eta"] > cur["eta"]):
+                cur["eta"] = q["eta"]
+        else:
+            by_season[key] = dict(q)
+
     out = []
-    seen = set()               # a mesma série pode ter 2 pedidos (temporadas): mostra uma linha
-    include_declined = False   # pedidos recusados são histórico: fora da lista da TV
+    seen = set()
+    include_declined = False
     for r in (d or {}).get("results", []):
         if r.get("status") == 3 and not include_declined:
             continue
         media = r.get("media") or {}
         tmdb = media.get("tmdbId")
-        shown_type = media.get("mediaType") or "movie"        # "movie" ou "tv" (para exibir)
-        mt = "series" if shown_type == "tv" else "movie"      # chave interna (Radarr/Sonarr)
+        shown_type = media.get("mediaType") or "movie"
+        mt = "series" if shown_type == "tv" else "movie"
         title = media.get("title") or media.get("name") or media.get("originalTitle") or seerr_title(tmdb, shown_type)
-        state, pct, eta, size, err = None, None, None, None, None
-        key = (mt, tmdb)
-        q = by_id.get((mt, local.get(key)))
-        if q:
-            state = RADARR_Q.get(q["state"], q["state"])
-            pct, eta, size, err = q["pct"], q["timeleft"], q["sizeleft_gb"], q["error"]
-        elif has_file.get(key) or media.get("status") == 5:
-            state = "disponível"
-        elif r.get("status") == 1:
-            state = "aguardando aprovação"
-        elif r.get("status") == 3:
-            state = "recusado"
-        elif key not in local:
-            continue   # pedido sem mídia no Radarr: já foi apagado, não polui a lista
-        else:
-            state = "monitorado, sem release"
-        if (mt, tmdb) in seen:
-            continue
-        seen.add((mt, tmdb))
-        out.append({"id": r.get("id"), "tmdb": tmdb, "type": shown_type, "title": title,
-                    "request": SEERR_STATUS.get(r.get("status")), "media": SEERR_MEDIA.get(media.get("status")),
-                    "state": state, "pct": pct, "eta": eta, "sizeleft_gb": size, "error": err,
-                    "at": r.get("createdAt")})
+        local_id = local.get((mt, tmdb))
+        seasons = (r.get("seasons") or []) if mt == "series" else [None]
+        for season in (seasons or [None]):
+            sn = (season or {}).get("seasonNumber")
+            if (mt, tmdb, sn) in seen:
+                continue
+            seen.add((mt, tmdb, sn))
+            state, pct, eta, size, err = None, None, None, None, None
+            q = by_movie.get(local_id) if mt == "movie" else by_season.get((local_id, sn))
+            if q:
+                state = RADARR_Q.get(q["state"], q["state"])
+                pct, eta, size, err = q["pct"], q["eta"] if "eta" in q else q.get("timeleft"), q["sizeleft_gb"], q["error"]
+            elif has_file.get((mt, tmdb)) or media.get("status") == 5 or (season or {}).get("status") == 5 \
+                    or (mt == "series" and local_id is not None
+                        and cached("seasons_%s" % local_id, 120, lambda i=local_id: series_seasons(i)).get(sn)):
+                state = "disponível"
+            elif r.get("status") == 1:
+                state = "aguardando aprovação"
+            elif local_id is None:
+                continue
+            else:
+                state = "monitorado, sem release"
+            label = title if sn is None else "%s — T%s" % (title, sn)
+            out.append({"id": r.get("id"), "tmdb": tmdb, "type": shown_type, "title": label,
+                        "season": sn, "request": SEERR_STATUS.get(r.get("status")),
+                        "media": SEERR_MEDIA.get(media.get("status")), "state": state,
+                        "pct": pct, "eta": eta, "sizeleft_gb": size, "error": err, "at": r.get("createdAt")})
     return {"items": out}
 
 
@@ -350,6 +370,17 @@ def purge_recycle():
             except OSError:
                 pass
     return {"freed_gb": gb(freed)}
+
+
+def series_seasons(sid):
+    """Temporadas com todos os episódios no disco, segundo o Sonarr."""
+    d = sonarr("/api/v3/series/%s" % sid) or {}
+    out = {}
+    for se in d.get("seasons") or []:
+        st = se.get("statistics") or {}
+        total, have = st.get("totalEpisodeCount") or 0, st.get("episodeFileCount") or 0
+        out[se.get("seasonNumber")] = total > 0 and have >= total
+    return out
 
 
 def host_health():
