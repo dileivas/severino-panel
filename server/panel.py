@@ -10,7 +10,10 @@ Escrita (exige X-Panel-Token): POST /request, /delete, /subtitles/search, /hook/
 
 import json
 import os
+import re
 import shutil
+import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -455,6 +458,331 @@ def add_event(kind, title):
     EVENTS.append({"at": int(time.time()), "kind": kind, "title": title})
 
 
+# ======================================================================================
+# Legendas com IA: extrai a legenda do idioma original do próprio arquivo, valida o
+# sincronismo contra o áudio, traduz com o DeepSeek e grava "<video>.pt-BR.srt".
+# Sem OCR e sem ASR: se não houver legenda de TEXTO no idioma original, o job falha
+# com uma mensagem clara.
+# ======================================================================================
+
+FFMPEG = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+FFPROBE = "/usr/lib/jellyfin-ffmpeg/ffprobe"
+TEXT_CODECS = ("subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text")
+LANG3 = {"en": "eng", "pt": "por", "es": "spa", "fr": "fre", "de": "ger", "it": "ita",
+         "ja": "jpn", "ko": "kor", "zh": "chi", "ru": "rus", "hi": "hin", "ar": "ara"}
+JOBS = {}
+_JOBS_LOCK = threading.Lock()
+_JOB_SEQ = [0]
+
+
+HOST_MEDIA, CONT_MEDIA = "/DATA/Media", "/Media"
+
+
+def _cont(path):
+    """O container do Jellyfin vê /DATA/Media como /Media."""
+    return CONT_MEDIA + path[len(HOST_MEDIA):] if path.startswith(HOST_MEDIA) else path
+
+
+def _docker(args, timeout=600):
+    """Roda ffmpeg/ffprobe dentro do container do Jellyfin (já tem os binários)."""
+    r = subprocess.run(["docker", "exec", "jellyfin"] + args, capture_output=True, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr
+
+
+def _probe(path):
+    code, out, err = _docker([FFPROBE, "-v", "error", "-select_streams", "s", "-show_entries",
+                              "stream=index,codec_name:stream_tags=language,title", "-of", "json", _cont(path)], 120)
+    if code != 0:
+        raise RuntimeError("ffprobe falhou: " + err.decode("utf-8", "replace")[:200])
+    return json.loads(out or b"{}").get("streams", [])
+
+
+def _movie_file(movie):
+    """Arquivo de vídeo do filme (o Radarr sabe o caminho)."""
+    folder = movie.get("folderName") or ""
+    base = os.path.join("/DATA/Media/Movies", folder)
+    if not os.path.isdir(base):
+        base = movie.get("path") or base
+    for root, _d, files in os.walk(base):
+        for f in files:
+            if f.lower().endswith((".mkv", ".mp4", ".avi", ".m4v")):
+                return os.path.join(root, f)
+    raise RuntimeError("arquivo de vídeo não encontrado em " + base)
+
+
+def _pick_source(video, orig2):
+    """A melhor legenda de TEXTO no idioma original: embutida (sem SDH) > SDH > externa."""
+    orig3 = LANG3.get((orig2 or "en").lower(), (orig2 or "en").lower())
+    streams = _probe(video)
+    text = [s for s in streams if (s.get("codec_name") or "").lower() in TEXT_CODECS]
+    same = [s for s in text if ((s.get("tags") or {}).get("language") or "").lower() in (orig3, orig2)]
+    plain = [s for s in same if "sdh" not in (((s.get("tags") or {}).get("title") or "").lower())]
+    for group in (plain, same, text):
+        if group:
+            s = group[0]
+            return {"kind": "embedded", "index": s["index"], "codec": s.get("codec_name"),
+                    "lang": (s.get("tags") or {}).get("language") or "?"}
+    # externa: "<video>.<lang>.srt"
+    stem = os.path.splitext(video)[0]
+    folder = os.path.dirname(video)
+    for code in (orig2, orig3, "en"):
+        for f in sorted(os.listdir(folder)):
+            low = f.lower()
+            if low.endswith((".srt", ".ass", ".vtt")) and (("." + code + ".") in low or low.endswith("." + code + ".srt")):
+                return {"kind": "external", "path": os.path.join(folder, f), "lang": code}
+    return None
+
+
+def _extract(source, video, out):
+    if source["kind"] == "embedded":
+        code, data, err = _docker([FFMPEG, "-v", "error", "-i", _cont(video), "-map", "0:%d" % source["index"],
+                                   "-f", "srt", "-"], 600)
+        if code != 0 or not data.strip():
+            raise RuntimeError("extração falhou: " + err.decode("utf-8", "replace")[:200])
+        open(out, "wb").write(data)
+    else:
+        import shutil
+        shutil.copyfile(source["path"], out)
+
+
+def _parse_srt(path):
+    import re
+    raw = open(path, encoding="utf-8-sig", errors="replace").read().replace("\r\n", "\n")
+    cues = []
+    for block in re.split(r"\n\s*\n", raw.strip()):
+        lines = [l for l in block.split("\n")]
+        times = next((l for l in lines if "-->" in l), None)
+        if not times:
+            continue
+        m = re.search(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)", times)
+        if not m:
+            continue
+        g = [int(x) for x in m.groups()]
+        start = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000.0
+        end = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000.0
+        idx = times.find("-->")
+        body = "\n".join(lines[lines.index(times) + 1:]).strip()
+        cues.append({"start": start, "end": end, "text": body})
+    return cues
+
+
+def _ts(t):
+    ms = int(round(t * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return "%02d:%02d:%02d,%03d" % (h, m, s, ms)
+
+
+def _wrap(text, width=42):
+    """Quebra em no máximo 2 linhas de 42 caracteres, em limite de palavra."""
+    t = " ".join(text.split())
+    if len(t) <= width:
+        return t
+    if len(t) <= 2 * width:
+        mid = len(t) // 2
+        left = t.rfind(" ", 0, mid + 1)
+        right = t.find(" ", mid)
+        cut = left if left > 0 and (right < 0 or mid - left <= right - mid) else right
+        if cut > 0:
+            return t[:cut].strip() + "\n" + t[cut:].strip()
+    return t
+
+
+def _write_srt(cues, path):
+    with open(path, "w", encoding="utf-8") as f:
+        for i, c in enumerate(cues, 1):
+            f.write("%d\n%s --> %s\n%s\n\n" % (i, _ts(c["start"]), _ts(c["end"]), _wrap(c["text"]).strip()))
+
+
+def _audio_energy(video, start, dur, step=0.1):
+    import array
+    code, raw, _err = _docker([FFMPEG, "-v", "error", "-ss", "%.2f" % start, "-t", "%.2f" % dur,
+                               "-i", _cont(video), "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"], 300)
+    if code != 0 or not raw:
+        return []
+    a = array.array("h")
+    usable = len(raw) // 2 * 2
+    a.frombytes(raw[:usable])
+    n = int(8000 * step)
+    out = []
+    for i in range(0, len(a) - n, n):
+        chunk = a[i:i + n]
+        out.append(sum(abs(x) for x in chunk) / float(n))
+    return out
+
+
+def _estimate_offset(video, cues, duration):
+    """Compara a atividade das falas com a energia do áudio em 3 janelas; devolve o desvio em s."""
+    if not cues or not duration:
+        return 0.0, 0.0
+    shifts = range(-50, 51)          # -5 s .. +5 s em passos de 100 ms
+    score = {s: 0.0 for s in shifts}
+    for frac in (0.25, 0.55, 0.8):
+        start = max(0.0, duration * frac)
+        win = 120.0
+        energy = _audio_energy(video, start, win)
+        if not energy:
+            continue
+        cue_arr = []
+        for i in range(len(energy)):
+            t = start + i * 0.1
+            cue_arr.append(1.0 if any(c["start"] <= t < c["end"] for c in cues) else 0.0)
+        for s in shifts:
+            acc = 0.0
+            for i in range(len(energy)):
+                j = i - s
+                if 0 <= j < len(cue_arr) and cue_arr[j] > 0:
+                    acc += energy[i]
+            score[s] += acc
+    best = max(score, key=score.get)
+    total = sum(score.values()) or 1.0
+    return best * 0.1, round(score[best] / total, 2)
+
+
+def _shift(cues, delta):
+    for c in cues:
+        c["start"] = max(0.0, c["start"] + delta)
+        c["end"] = max(0.0, c["end"] + delta)
+    return cues
+
+
+def _deepseek(messages, max_tokens=8000):
+    key = CONF_VALUES.get("DEEPSEEK_KEY", "")
+    if not key:
+        raise RuntimeError("DEEPSEEK_KEY ausente no keys.env")
+    body = json.dumps({"model": "deepseek-chat", "messages": messages, "temperature": 0.2,
+                       "max_tokens": max_tokens}).encode()
+    req = urllib.request.Request("https://api.deepseek.com/chat/completions", data=body, method="POST",
+                                 headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=240) as r:
+        d = json.loads(r.read())
+    return d["choices"][0]["message"]["content"]
+
+
+def _context(tmdb_id, media_type="movie"):
+    try:
+        d = seerr("/api/v1/%s/%s" % ("tv" if media_type == "tv" else "movie", tmdb_id)) or {}
+        return {"title": d.get("title") or d.get("name"), "year": (d.get("releaseDate") or d.get("firstAirDate") or "")[:4],
+                "original_title": d.get("originalTitle") or d.get("originalName"),
+                "original_language": d.get("originalLanguage"),
+                "overview": (d.get("overview") or "")[:900],
+                "genres": [g.get("name") for g in (d.get("genres") or [])][:6]}
+    except Exception:
+        return {"title": "", "year": "", "original_language": "en", "overview": "", "genres": []}
+
+
+SYSTEM = (
+    "Você traduz legendas de filmes para português do Brasil.\n"
+    "Regras obrigatórias:\n"
+    "- Traduza apenas o texto; nunca invente, resuma ou comente.\n"
+    "- Mantenha as tags <i> e </i> exatamente onde estão.\n"
+    "- Uma tradução por item: não junte nem divida falas.\n"
+    "- Português brasileiro natural e curto, com no máximo 42 caracteres por linha e no máximo 2 linhas, "
+    "usando \\n entre elas.\n"
+    "- Nomes próprios, marcas e títulos: mantenha (ou a forma consagrada no Brasil).\n"
+    "- Diálogo incompreensível: traduza literalmente, sem inventar.\n"
+    "Responda SOMENTE com JSON válido: {\"items\":[{\"i\":<id>,\"t\":\"<texto>\"}]}"
+)
+
+
+def _translate(cues, ctx, progress):
+    out = []
+    batch = 80
+    for start in range(0, len(cues), batch):
+        part = cues[start:start + batch]
+        payload = {"i": i, "t": c["text"]} if False else [{"i": i, "t": c["text"]} for i, c in enumerate(part)]
+        user = ("CONTEÚDO: %s (%s), título original \"%s\", idioma original %s. Gêneros: %s.\n"
+                "SINOPSE: %s\n\nTraduza as %d falas abaixo para pt-BR e devolva o JSON com os mesmos ids.\n%s"
+                % (ctx.get("title"), ctx.get("year"), ctx.get("original_title"), ctx.get("original_language"),
+                   ", ".join(ctx.get("genres") or []), ctx.get("overview"), len(part),
+                   json.dumps(payload, ensure_ascii=False)))
+        got = {}
+        for attempt in range(2):
+            try:
+                txt = _deepseek([{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}])
+                m = re.search(r"\{.*\}", txt, re.S)
+                data = json.loads(m.group(0) if m else txt)
+                for it in data.get("items", []):
+                    if isinstance(it.get("i"), int) and isinstance(it.get("t"), str):
+                        got[it["i"]] = it["t"]
+                if len(got) >= len(part) * 0.9:
+                    break
+            except Exception:
+                if attempt == 1:
+                    raise
+        for i, c in enumerate(part):
+            t = got.get(i)
+            out.append({"start": c["start"], "end": c["end"], "text": (t if t else c["text"])})
+        progress(min(95, 10 + int(85 * (start + len(part)) / max(1, len(cues)))))
+    return out
+
+
+def _job_set(job, **kw):
+    with _JOBS_LOCK:
+        JOBS.setdefault(job, {}).update(kw)
+
+
+def _job_run(job, movie_id):
+    try:
+        _job_set(job, state="running", pct=2, step="lendo o filme")
+        m = next((x for x in movies() if x["id"] == movie_id), None)
+        if not m:
+            raise RuntimeError("filme %s não está no Radarr" % movie_id)
+        video = _movie_file(m)
+        ctx = _context(m.get("tmdb"))
+        orig = (ctx.get("original_language") or "en")[:2]
+        _job_set(job, pct=8, step="escolhendo a legenda fonte (idioma original: %s)" % orig)
+        src = _pick_source(video, orig)
+        if not src:
+            raise RuntimeError("sem legenda de TEXTO no idioma original (%s). OCR/ASR desativados." % orig)
+        tmp = "/tmp/subai-%s.srt" % job
+        _extract(src, video, tmp)
+        cues = _parse_srt(tmp)
+        if not cues:
+            raise RuntimeError("legenda fonte vazia")
+        _job_set(job, pct=20, step="validando sincronismo contra o áudio",
+                 source=("%s %s" % (src["kind"], src.get("lang") or "")))
+        dur = 0.0
+        try:
+            dur = float(m.get("movieFile", {}).get("mediaInfo", {}).get("runTime") or 0)
+        except Exception:
+            dur = 0.0
+        if not dur:
+            try:
+                d = seerr("/api/v1/movie/%s" % m.get("tmdb")) or {}
+                dur = float(d.get("runtime") or 0) * 60
+            except Exception:
+                dur = 0.0
+        offset, conf = _estimate_offset(video, cues, dur)
+        if abs(offset) >= 0.5:
+            cues = _shift(cues, offset)
+        _job_set(job, pct=30, step="traduzindo %d falas" % len(cues),
+                 offset_s=round(offset, 2), offset_conf=conf)
+        out = _translate(cues, ctx, lambda p: _job_set(job, pct=p))
+        stem = os.path.splitext(video)[0]
+        dst = stem + ".pt-BR.srt"
+        _job_set(job, pct=97, step="gravando " + os.path.basename(dst))
+        _write_srt(out, dst)
+        try:
+            jellyfin("/Library/Refresh", method="POST")
+        except Exception:
+            pass
+        _job_set(job, state="done", pct=100, step="pronto", out=dst,
+                 cues=len(out), source_kind=src["kind"])
+    except Exception as e:
+        _job_set(job, state="error", pct=100, step="falhou", error=str(e))
+
+
+def start_ai_job(movie_id):
+    with _JOBS_LOCK:
+        _JOB_SEQ[0] += 1
+        job = "j%d" % _JOB_SEQ[0]
+        JOBS[job] = {"state": "queued", "pct": 0, "step": "na fila", "at": int(time.time())}
+    threading.Thread(target=_job_run, args=(job, movie_id), daemon=True).start()
+    return job
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -503,6 +831,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, subtitles())
             if path == "/recycle":
                 return self._send(200, recycle_info())
+            if path.startswith("/jobs/"):
+                j = JOBS.get(path.split("/")[-1])
+                return self._send(200 if j else 404, j or {"error": "job"})
             if path == "/events":
                 since = int(dict(urllib.parse.parse_qsl(query)).get("since", 0))
                 return self._send(200, {"events": [e for e in EVENTS if e["at"] > since], "now": int(time.time())})
@@ -528,6 +859,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, make_request(b["tmdbId"], b.get("type", "movie")) or {"ok": True})
             if path == "/delete":
                 return self._send(200, delete(b.get("kind", "movie"), b["id"], b.get("files", True)))
+            if path == "/subtitles/ai":
+                return self._send(200, {"job": start_ai_job(int(b["id"]))})
             if path == "/subtitles/search":
                 return self._send(200, {"ok": True, "result": subtitle_search(b.get("kind", "movie"), b["id"])})
             if path == "/recycle/purge":

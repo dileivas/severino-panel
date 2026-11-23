@@ -80,7 +80,7 @@ function pill(state) {
   return `<span class="pill ${cls}">${state || "—"}</span>`;
 }
 
-async function load() {
+async function load(force) {
   if (loading) return; loading = true;
   try {
     const o = await fetch("/overview", { cache: "no-store" }).then(r => r.json());
@@ -98,7 +98,7 @@ async function load() {
     data.library = lib.items || [];
     data.subs = subs.items || [];
     $("#stamp").textContent = "atualizado " + new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    render();
+    render(force);
   } catch (e) { /* servidor fora: mantém a última tela, sem erro na cara do usuário */ }
   loading = false;
 }
@@ -142,6 +142,7 @@ function render(force) {
       <div class="item" tabindex="0" data-fkey="sub-${x.id}">
         <div class="t"><b>${x.title}</b><small>${x.year || ""} · sem ${x.missing.join(", ")}</small></div>
         <button class="act" data-hold="1" data-fkey="subact-${x.id}" data-sub="${x.id}">Segure: buscar</button>
+        <button class="act" data-hold="1" data-ai="${x.id}" data-fkey="ai-${x.id}">Segure: gerar IA</button>
       </div>`).join("") : `<div class="empty">todas as legendas em dia</div>`;
   }
   const again = keep ? document.querySelector(`[data-fkey="${keep}"]`) : null;
@@ -155,8 +156,7 @@ function rows() {
   if (tabs.length) r.push(tabs);
   document.querySelectorAll(".item").forEach(it => {
     const row = [it];
-    const btn = it.querySelector("button.act");
-    if (btn && btn.offsetParent) row.push(btn);
+    it.querySelectorAll("button.act").forEach(btn => { if (btn.offsetParent) row.push(btn); });
     r.push(row);
   });
   return r;
@@ -229,6 +229,30 @@ async function run(el) {
       const d = await r.json();
       toast("lixeira esvaziada — " + fmt(d.freed_gb) + " liberados"); await load();
     } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Segure: esvaziar"; }
+  } else if (el.dataset.ai) {
+    const id = Number(el.dataset.ai);
+    el.disabled = true; el.textContent = "IA 0%";
+    try {
+      const r = await fetch("/subtitles/ai", { method: "POST", headers: H, body: JSON.stringify({ id }) });
+      if (!r.ok) throw new Error((await r.json()).error || r.status);
+      const { job } = await r.json();
+      toast("gerando legenda com IA…");
+      const timer = setInterval(async () => {
+        try {
+          const j = await fetch(`/jobs/${job}`, { cache: "no-store" }).then(x => x.json());
+          if (j.pct != null && el.isConnected) el.textContent = "IA " + j.pct + "%";
+          if (j.state === "done") {
+            clearInterval(timer);
+            toast("legenda pronta: " + (j.cues || "") + " falas");
+            el.disabled = false; el.textContent = "Gerar com IA"; load(true);
+          } else if (j.state === "error") {
+            clearInterval(timer);
+            toast("falhou: " + (j.error || "").slice(0, 90));
+            el.disabled = false; el.textContent = "Gerar com IA";
+          }
+        } catch (e) { /* segue tentando */ }
+      }, 2000);
+    } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Gerar com IA"; }
   } else if (el.dataset.sub) {
     el.textContent = "buscando…";
     try {

@@ -44,6 +44,21 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 A URL do painel já vem preenchida em `SetupActivity`.
 
+## Legendas com IA
+
+Botão **"Segure: gerar IA"** na aba Legendas:
+
+1. acha o melhor subtítulo de **TEXTO no idioma original** — embutido no próprio arquivo (sem SDH), senão
+   externo `.<lang>.srt`; **sem OCR e sem ASR**: se não houver texto, o job falha com mensagem clara;
+2. extrai com o ffmpeg do container do Jellyfin (`-map 0:<idx> -f srt -`);
+3. **valida o sincronismo** contra o áudio: em 3 janelas de 120 s compara a energia do áudio com a
+   atividade das falas e estima o desvio (±5 s em passos de 100 ms); desloca as cues se passar de 0,5 s;
+4. traduz com o **DeepSeek** em lotes de 80 falas, com título/ano/sinopse/gêneros do TMDB;
+5. grava `"<video>.pt-BR.srt"` (nunca sobrescreve outra faixa) e pede refresh da biblioteca do Jellyfin.
+
+`DEEPSEEK_KEY` no `keys.env` (chmod 600). O job é assíncrono: `POST /subtitles/ai` devolve `job` e
+`GET /jobs/<id>` o progresso, que a TV mostra no próprio botão.
+
 ## Lixeira do Radarr
 
 O Radarr manda o arquivo para `recycle/` em vez de apagar: o espaço **só volta ao esvaziar**. O painel mostra o
