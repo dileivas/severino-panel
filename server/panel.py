@@ -72,20 +72,20 @@ def api(base, path, key, header="X-Api-Key", method="GET", body=None, timeout=8)
         return json.loads(raw) if raw else None
 
 
-def jellyfin(path, **q):
+def jellyfin(path, method="GET", **q):
     query = urllib.parse.urlencode({k: v for k, v in q.items() if v is not None})
     return api(JELLYFIN, path + ("?" + query if query else ""), CONF_VALUES.get("JELLYFIN_KEY", ""),
-               header="X-Emby-Token")
+               header="X-Emby-Token", method=method)
 
 
-def radarr(path, **q):
+def radarr(path, method="GET", **q):
     query = urllib.parse.urlencode({k: v for k, v in q.items() if v is not None})
-    return api(RADARR, path + ("?" + query if query else ""), CONF_VALUES.get("RADARR_KEY", ""))
+    return api(RADARR, path + ("?" + query if query else ""), CONF_VALUES.get("RADARR_KEY", ""), method=method)
 
 
-def sonarr(path, **q):
+def sonarr(path, method="GET", **q):
     query = urllib.parse.urlencode({k: v for k, v in q.items() if v is not None})
-    return api(SONARR, path + ("?" + query if query else ""), CONF_VALUES.get("SONARR_KEY", ""))
+    return api(SONARR, path + ("?" + query if query else ""), CONF_VALUES.get("SONARR_KEY", ""), method=method)
 
 
 def seerr(path, method="GET", body=None):
@@ -525,14 +525,37 @@ def make_request(tmdb, media_type):
     return seerr("/api/v1/request", method="POST", body={"mediaType": media_type, "mediaId": int(tmdb)})
 
 
-def delete(kind, item_id, files):
-    if kind == "movie":
-        radarr(f"/api/v3/movie/{item_id}?deleteFiles={'true' if files else 'false'}&addImportExclusion=false",
-               method="DELETE")
-    else:
-        sonarr(f"/api/v3/series/{item_id}?deleteFiles={'true' if files else 'false'}&addImportExclusion=false",
-               method="DELETE")
-    return {"deleted": True}
+def sync_all():
+    """Depois de mexer na biblioteca: Seerr revarre Radarr/Sonarr e o Jellyfin relê as pastas."""
+    out = {}
+    for job in ("radarr-scan", "sonarr-scan"):
+        try:
+            seerr("/api/v1/settings/jobs/%s/run" % job, method="POST")
+            out[job] = "ok"
+        except Exception as e:
+            out[job] = str(e)
+    try:
+        jellyfin("/Library/Refresh", method="POST")
+        out["jellyfin"] = "ok"
+    except Exception as e:
+        out["jellyfin"] = str(e)
+    for k in ("library", "requests", "overview", "subtitles_catalog"):
+        _CACHE.pop(k, None)
+    return out
+
+
+def delete(kind, item_id, files=True):
+    """Exclui no Radarr/Sonarr e CONFIRMA: nunca responde sucesso sem checar."""
+    base = radarr if kind == "movie" else sonarr
+    path = "/api/v3/movie/%s" % item_id if kind == "movie" else "/api/v3/series/%s" % item_id
+    base(path + "?deleteFiles=%s&addImportExclusion=false" % ("true" if files else "false"), method="DELETE")
+    still = base(path.replace("/%s" % item_id, ""))  # lista tudo
+    ids = [x.get("id") for x in (still or [])]
+    if item_id in ids:
+        raise RuntimeError("o Radarr aceitou mas o item continua na biblioteca")
+    _CACHE.pop("library", None)
+    _CACHE.pop("overview", None)
+    return {"deleted": True, "sync": sync_all()}
 
 
 def subtitle_search(kind, item_id):
@@ -951,6 +974,8 @@ class Handler(BaseHTTPRequestHandler):
             b = self._body()
             if path == "/request":
                 return self._send(200, make_request(b["tmdbId"], b.get("type", "movie")) or {"ok": True})
+            if path == "/sync":
+                return self._send(200, sync_all())
             if path == "/delete":
                 return self._send(200, delete(b.get("kind", "movie"), b["id"], b.get("files", True)))
             if path == "/subtitles/ai":

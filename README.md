@@ -66,6 +66,16 @@ Botão **"Segure: gerar IA"** na aba Legendas:
 `DEEPSEEK_KEY` no `keys.env` (chmod 600). O job é assíncrono: `POST /subtitles/ai` devolve `job` e
 `GET /jobs/<id>` o progresso, que a TV mostra no próprio botão.
 
+## Excluir e sincronizar
+
+`Excluir` (e `Esvaziar`) são de **um toque**. O painel apaga no Radarr/Sonarr, **relê a lista para confirmar**
+(nunca responde sucesso sem checar) e então dispara o sync: `radarr-scan` e `sonarr-scan` no Seerr +
+`/Library/Refresh` no Jellyfin, limpando os caches do painel.
+
+> Bug corrigido: os helpers `radarr()`, `sonarr()` e `jellyfin()` não aceitavam `method`, então
+> `method="DELETE"` virava **query string** e a exclusão era um `GET` — que respondia 200 e não apagava.
+> O refresh do Jellyfin idem (405).
+
 ## Lixeira do Radarr
 
 O Radarr manda o arquivo para `recycle/` em vez de apagar: o espaço **só volta ao esvaziar**. O painel mostra o

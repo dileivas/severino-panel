@@ -127,7 +127,7 @@ function render(force) {
     const bin = data.recycle && data.recycle.gb >= 1 ? `
       <div class="item" tabindex="0" data-fkey="bin">
         <div class="t"><b>Lixeira</b><small>${fmt(data.recycle.gb)} em arquivos excluídos — o espaço só volta ao esvaziar</small></div>
-        <button class="act danger" data-hold="1" data-fkey="purge" data-purge="1">Segure: esvaziar</button>
+        <button class="act danger" data-fkey="purge" data-purge="1">Esvaziar</button>
       </div>` : "";
     l.innerHTML = bin + (data.library.length ? data.library.map(i => `
       <div class="item" tabindex="0" data-fkey="lib-${i.id}">
@@ -135,7 +135,7 @@ function render(force) {
           <small>${i.kind === "movie" ? "filme" : "série"} · ${i.year || ""}${
             i.watched ? ` · assistido há ${i.watched_days}d → sai em ${i.delete_in_days}d` : ""}</small></div>
         <span class="pill">${fmt(i.size_gb)}</span>
-        <button class="act danger" data-hold="1" data-fkey="del-${i.id}" data-kind="${i.kind}" data-id="${i.id}">Segure: excluir</button>
+        <button class="act danger" data-fkey="del-${i.id}" data-kind="${i.kind}" data-id="${i.id}">Excluir</button>
       </div>`).join("") : `<div class="empty">biblioteca vazia</div>`);
   } else {
     l.innerHTML = data.subs.length ? data.subs.map(x => `
@@ -221,8 +221,8 @@ async function run(el) {
     try {
       const r = await fetch("/delete", { method: "POST", headers: H, body: JSON.stringify({ kind, id, files: true }) });
       if (!r.ok) throw new Error((await r.json()).error || r.status);
-      toast("excluído — espaço liberado"); await load();
-    } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Segure: excluir"; }
+      toast("excluído — sinando Seerr/Jellyfin"); await load(true);
+    } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Excluir"; }
   } else if (el.dataset.purge) {
     el.textContent = "esvaziando…";
     try {
@@ -230,7 +230,7 @@ async function run(el) {
       if (!r.ok) throw new Error((await r.json()).error || r.status);
       const d = await r.json();
       toast("lixeira esvaziada — " + fmt(d.freed_gb) + " liberados"); await load();
-    } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Segure: esvaziar"; }
+    } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Esvaziar"; }
   } else if (el.dataset.ai) {
     const id = Number(el.dataset.ai);
     el.disabled = true; el.textContent = "IA 0%";
@@ -261,7 +261,7 @@ async function run(el) {
       const r = await fetch("/subtitles/search", { method: "POST", headers: H, body: JSON.stringify({ kind: "movie", id: Number(el.dataset.sub) }) });
       if (!r.ok) throw new Error((await r.json()).error || r.status);
       toast("busca de legenda enviada"); await load();
-    } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Segure: buscar"; }
+    } catch (e) { toast("erro: " + e.message); el.disabled = false; el.textContent = "Buscar"; }
   }
 }
 
@@ -278,7 +278,7 @@ window.__seerrNav = function (cmd) {
 
 // Um toque: o wrapper entrega OK como click no key-up, então a ação roda direto.
 document.addEventListener("click", e => {
-  const b = e.target.closest("button[data-ai],button[data-sub]");
+  const b = e.target.closest("button[data-ai],button[data-sub],button[data-kind],button[data-purge]");
   if (!b) return;
   run(b);
 });
