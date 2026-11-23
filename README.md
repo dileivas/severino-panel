@@ -58,10 +58,17 @@ Botão **"Segure: gerar IA"** na aba Legendas:
 1. acha o melhor subtítulo de **TEXTO no idioma original** — embutido no próprio arquivo (sem SDH), senão
    externo `.<lang>.srt`; **sem OCR e sem ASR**: se não houver texto, o job falha com mensagem clara;
 2. extrai com o ffmpeg do container do Jellyfin (`-map 0:<idx> -f srt -`);
-3. **valida o sincronismo** contra o áudio: em 3 janelas de 120 s compara a energia do áudio com a
-   atividade das falas e estima o desvio (±5 s em passos de 100 ms); desloca as cues se passar de 0,5 s;
+3. **valida o sincronismo** contra o áudio: 5 janelas de 120 s (início, 25%, 50%, 75%, fim); em cada uma
+   correlaciona a energia do áudio com a atividade das falas (busca de ±8 s em passos de 100 ms) e usa a
+   **mediana + inliers** — uma cena com música vira outlier e não contamina o resultado. Só desloca as cues
+   quando a mediana passa de 1,0 s;
 4. traduz com o **DeepSeek** em lotes de 80 falas, com título/ano/sinopse/gêneros do TMDB;
 5. grava `"<video>.pt-BR.srt"` (nunca sobrescreve outra faixa) e pede refresh da biblioteca do Jellyfin.
+
+**Limite conhecido:** deriva de fps (23,976 x 25) **não** é corrigida. Seriam precisos minutos de diferença
+no fim do filme, e a correlação por energia não distingue isso de ruído numa busca larga. Para isso seria
+necessário fingerprint de áudio (chromaprint) ou timestamps de ASR. Medido em legenda sintética: o detector
+acerta desvios de ±3, ±4 e ±8 s (4 janelas concordando) e ignora legenda correta, mas não detecta a escala.
 
 `DEEPSEEK_KEY` no `keys.env` (chmod 600). O job é assíncrono: `POST /subtitles/ai` devolve `job` e
 `GET /jobs/<id>` o progresso, que a TV mostra no próprio botão.

@@ -723,32 +723,99 @@ def _audio_energy(video, start, dur, step=0.1):
     return out
 
 
-def _estimate_offset(video, cues, duration):
-    """Compara a atividade das falas com a energia do áudio em 3 janelas; devolve o desvio em s."""
-    if not cues or not duration:
-        return 0.0, 0.0
-    shifts = range(-50, 51)          # -5 s .. +5 s em passos de 100 ms
-    score = {s: 0.0 for s in shifts}
-    for frac in (0.25, 0.55, 0.8):
-        start = max(0.0, duration * frac)
-        win = 120.0
-        energy = _audio_energy(video, start, win)
-        if not energy:
+# 23,976 (filme) x 25 (PAL): a legenda de uma versão "escapa" da outra ~4,27% por hora.
+# Só 1,0: a correlação por energia não é confiável em busca larga (ver README); o drift
+# precisaria de fingerprint de áudio (chromaprint) ou timestamps de ASR.
+SCALES = (1.0,)
+
+
+def _activity(cues, scale, start, count, step=0.1):
+    """Para cada 100 ms da janela: 1 se há fala da legenda (já escalada), senão 0."""
+    out = [0.0] * count
+    for c in cues:
+        a, b = c["start"] * scale, c["end"] * scale
+        i0 = int((a - start) / step)
+        i1 = int((b - start) / step)
+        for i in range(max(0, i0), min(count, i1 + 1)):
+            out[i] = 1.0
+    return out
+
+
+def _window_shift(video, cues, start, win, scale=1.0, max_shift=8.0, step=0.1):
+    """Melhor desvio (s) desta janela, com a legenda já escalada."""
+    energy = _audio_energy(video, start, win)
+    if not energy:
+        return None
+    n = len(energy)
+    norm_e = sum(e * e for e in energy) or 1.0
+    act = _activity(cues, scale, start, n)
+    act_total = sum(act) or 1.0          # constante: deslocar não cria nem apaga fala
+    pad = int(max_shift / 0.1)
+    ext = [0.0] * pad + act + [0.0] * pad
+    step_n = int(step / 0.1) or 1
+    best = (-1.0, 0)
+    for shift in range(-pad, pad + 1, step_n):
+        dot = 0.0
+        active = 0
+        for i in range(n):
+            j = i - shift + pad
+            if 0 <= j < len(ext) and ext[j]:
+                dot += energy[i]
+                active += 1
+        if dot <= 0 or active < act_total * 0.5:   # pouca sobreposição = artefato de borda
             continue
-        cue_arr = []
-        for i in range(len(energy)):
-            t = start + i * 0.1
-            cue_arr.append(1.0 if any(c["start"] <= t < c["end"] for c in cues) else 0.0)
-        for s in shifts:
-            acc = 0.0
-            for i in range(len(energy)):
-                j = i - s
-                if 0 <= j < len(cue_arr) and cue_arr[j] > 0:
-                    acc += energy[i]
-            score[s] += acc
-    best = max(score, key=score.get)
-    total = sum(score.values()) or 1.0
-    return best * 0.1, round(score[best] / total, 2)
+        score = dot / ((norm_e * act_total) ** 0.5)
+        if score > best[0]:
+            best = (score, shift)
+    return best[1] * 0.1, best[0]
+
+
+def _robust(shifts, tol=0.6):
+    """Mediana e inliers: uma cena com música derruba só ela, não o resultado."""
+    if not shifts:
+        return None
+    vals = sorted(s for _t, s in shifts)
+    med = vals[len(vals) // 2] if len(vals) % 2 else (vals[len(vals) // 2 - 1] + vals[len(vals) // 2]) / 2
+    inl = [(t, s) for t, s in shifts if abs(s - med) <= tol]
+    spread = (max(s for _t, s in inl) - min(s for _t, s in inl)) if inl else 99.0
+    return med, inl, spread
+
+
+def _estimate_sync(video, cues, duration):
+    """Desvio e deriva (fps) entre legenda e áudio, com mediana + inliers por escala.
+
+    A escala só ganha de 1,0 se tiver mais janelas concordando — é a trava para não
+    mexer numa legenda que já está certa.
+    """
+    if not cues or not duration:
+        return 1.0, 0.0, 0.0, 0
+    windows = 1 if duration < 900 else int(os.environ.get("AI_WINDOWS", "5"))
+    win = float(os.environ.get("AI_WINDOW_S", "120"))
+    results = {}
+    for scale in SCALES:
+        pts = []
+        for k in range(windows):
+            start = max(0.0, duration * (k + 0.5) / windows - win / 2.0)
+            got = _window_shift(video, cues, start, win, scale=scale)
+            if got:
+                pts.append((start + win / 2.0, got[0]))
+        r = _robust(pts)
+        if r:
+            results[scale] = r
+    if not results:
+        return 1.0, 0.0, 0.0, 0
+    one = results.get(1.0)
+    best_scale = max(results, key=lambda sc: (len(results[sc][1]), -results[sc][2]))
+    med, inl, spread = results[best_scale]
+    if best_scale != 1.0:
+        # escala só entra se tiver pelo menos uma janela a mais que 1,0 e dispersão baixa
+        if not one or len(inl) < len(one[1]) + 1 or spread > 0.5:
+            best_scale = 1.0
+            med, inl, spread = one if one else (0.0, [], 99.0)
+    if best_scale == 1.0 and abs(med) < 1.0:
+        med = 0.0                       # ruído: não mexe
+    conf = round(len(inl) / float(windows), 2)
+    return round(best_scale, 4), round(med, 2), conf, len(inl)
 
 
 def _shift(cues, delta):
@@ -865,11 +932,15 @@ def _job_run(job, movie_id):
                 dur = float(d.get("runtime") or 0) * 60
             except Exception:
                 dur = 0.0
-        offset, conf = _estimate_offset(video, cues, dur)
-        if abs(offset) >= 0.5:
+        scale, offset, conf, used = _estimate_sync(video, cues, dur)
+        if scale != 1.0:
+            for c in cues:
+                c["start"] = max(0.0, c["start"] * scale + offset)
+                c["end"] = max(0.0, c["end"] * scale + offset)
+        elif abs(offset) >= 0.5:
             cues = _shift(cues, offset)
         _job_set(job, pct=30, step="traduzindo %d falas" % len(cues),
-                 offset_s=round(offset, 2), offset_conf=conf)
+                 offset_s=offset, scale=scale, windows=used, offset_conf=conf)
         out = _translate(cues, ctx, lambda p: _job_set(job, pct=p))
         stem = os.path.splitext(video)[0]
         # Jellyfin lê "<titulo>.<idioma>.srt": assim a faixa aparece como "IA - Portuguese"
