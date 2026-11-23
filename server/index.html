@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Severino</title>
 <style>
-  :root { --bg:#0b1020; --card:#161d2f; --ink:#f2f4f8; --dim:#9aa3b5; --accent:#818cf8;
-          --green:#34c759; --amber:#ffb340; --red:#ff5147; }
+  :root { --bg:#0c1b32; --card:#152539; --card2:#1b2d45; --ink:#f5f7fa; --dim:#93a2ba;
+          --accent:#ffc702; --green:#34c759; --amber:#ffb340; --red:#ff5147; }
   * { box-sizing:border-box; }
   html,body { margin:0; min-height:100%; background:var(--bg); color:var(--ink);
               font:500 22px/1.35 -apple-system,"Segoe UI",Roboto,sans-serif; }
@@ -24,7 +24,7 @@
   .tabs { display:flex; gap:12px; margin:0 0 20px; }
   .tab { padding:12px 26px; border-radius:12px; background:#ffffff0d; color:var(--dim);
          border:2px solid transparent; font-size:20px; cursor:pointer; }
-  .tab.on { background:var(--card); color:var(--ink); border-color:var(--accent); }
+  .tab.on { background:var(--accent); color:#0c1b32; border-color:var(--accent); font-weight:700; }
   .item { display:flex; align-items:center; gap:20px; padding:14px 20px; margin-bottom:10px;
           background:var(--card); border-radius:14px; border:2px solid transparent; }
   .item .t { flex:1; min-width:0; }
@@ -34,15 +34,18 @@
   .prog > i { display:block; height:100%; background:var(--accent); transition:width .4s; }
   .pill { font-size:15px; padding:5px 12px; border-radius:999px; background:#ffffff14; color:var(--dim); white-space:nowrap; }
   .pill.ok { background:#34c75922; color:var(--green); } .pill.wait { background:#ffb34022; color:var(--amber); }
-  .pill.bad { background:#ff514722; color:var(--red); } .pill.dl { background:#818cf822; color:var(--accent); }
+  .pill.bad { background:#ff514722; color:var(--red); } .pill.dl { background:#ffc70222; color:var(--accent); }
   button.act { font:600 17px/1 inherit; padding:12px 18px; border-radius:10px; border:2px solid #ffffff26;
                background:#ffffff0f; color:var(--ink); cursor:pointer; min-width:190px; }
   button.act.danger { border-color:#ff514766; color:#ffb4ae; }
+  button.act[data-ai] { border-color:#ffc70266; color:#ffc702; }
   :focus { outline:3px solid var(--accent); outline-offset:3px; }
+  .item { background:var(--card); }
+  .item:focus { background:var(--card2); }
   .holding { background:#ff514733 !important; }
   .empty { color:var(--dim); padding:26px 4px; }
   #toast { position:fixed; left:50%; bottom:44px; transform:translateX(-50%) translateY(24px);
-           background:#222b40; padding:16px 26px; border-radius:12px; opacity:0; transition:.2s; font-size:20px; }
+           background:#1b2d45; border:2px solid #ffc70255; padding:16px 26px; border-radius:12px; opacity:0; transition:.2s; font-size:20px; }
   #toast.on { opacity:1; transform:translateX(-50%); }
 </style>
 </head>
@@ -272,7 +275,8 @@ window.__seerrNav = function (cmd) {
     if (cmd === "press") { return press() ? "hold" : "press"; }
     if (cmd === "release") { release(); return "release"; }
     if (cmd === "enter") { release(); return "click"; }          // compatibilidade
-    if (cmd === "back") { if (history.length > 1) history.back(); return "goback"; }
+    // A página é única (abas), então BACK sempre sai — o wrapper pede a 2ª confirmação.
+    if (cmd === "back") return "exit";
     nav(cmd); return "move";
   } catch (e) { return "err"; }
 };
