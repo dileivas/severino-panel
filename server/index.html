@@ -14,10 +14,20 @@
   header { display:flex; align-items:center; gap:26px; margin-bottom:22px; }
   h1 { font-size:32px; font-weight:600; margin:0; display:flex; align-items:center; gap:12px; }
   h1 img { width:46px; height:46px; }
-  .disk { flex:1; max-width:620px; }
-  .bar { height:12px; border-radius:6px; background:#ffffff18; overflow:hidden; }
-  .bar > i { display:block; height:100%; border-radius:6px; background:var(--green); transition:width .4s; }
-  .row2 { display:flex; justify-content:space-between; font-size:17px; color:var(--dim); margin-top:8px; }
+  .stats { flex:1; display:flex; gap:18px; flex-wrap:wrap; align-items:center; }
+  .stat { min-width:132px; }
+  .stat span { display:block; font-size:14px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); }
+  .stat b { display:block; font-size:22px; font-weight:600; margin-top:2px; }
+  .stat .bar { margin-top:6px; }
+  .bar { height:8px; border-radius:4px; background:#ffffff18; overflow:hidden; }
+  .bar > i { display:block; height:100%; border-radius:4px; background:var(--green); transition:width .4s; }
+  .side { text-align:right; display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+  .clock { font-size:44px; font-weight:300; letter-spacing:.02em; font-variant-numeric:tabular-nums; }
+  .live { display:flex; align-items:center; gap:8px; font-size:15px; color:var(--dim);
+          text-transform:uppercase; letter-spacing:.08em; }
+  .live i { width:10px; height:10px; border-radius:50%; background:var(--green); box-shadow:0 0 0 0 #34c75988; animation:pulse 2s infinite; }
+  .live.off i { background:var(--red); animation:none; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 #34c75988} 70%{box-shadow:0 0 0 9px #34c75900} 100%{box-shadow:0 0 0 0 #34c75900} }
   .alerts { display:flex; gap:12px; flex-wrap:wrap; }
   .chip { padding:8px 16px; border-radius:999px; font-size:17px; }
   .amber { background:#ffb34022; color:var(--amber); } .red { background:#ff514722; color:var(--red); }
@@ -51,12 +61,13 @@
 </head>
 <body>
 <header>
-  <h1><img src="/logo.png?v=2" alt="">Severino</h1>
-  <div class="disk">
-    <div class="bar"><i id="diskbar"></i></div>
-    <div class="row2"><span id="disktext">—</span><span id="stamp"></span></div>
-  </div>
+  <h1><img src="/logo.png?v=3" alt="">Severino</h1>
+  <div class="stats" id="stats"></div>
   <div class="alerts" id="alerts"></div>
+  <div class="side">
+    <div class="clock" id="clock">--:--</div>
+    <div class="live" id="live"><i></i>ao vivo</div>
+  </div>
 </header>
 
 <div class="tabs">
@@ -88,12 +99,10 @@ async function load(force) {
   if (loading) return; loading = true;
   try {
     const o = await fetch("/overview", { cache: "no-store" }).then(r => r.json());
-    const d = o.disk;
-    $("#diskbar").style.width = d.pct + "%";
-    $("#diskbar").style.background = d.pct >= 90 ? "var(--red)" : d.pct >= 80 ? "var(--amber)" : "var(--green)";
-    $("#disktext").textContent = `${fmt(d.used_gb)} de ${fmt(d.total_gb)} · ${fmt(d.free_gb)} livres · ${d.pct}%`;
+    renderHeader(o);
     $("#alerts").innerHTML = (o.alerts || []).map(a =>
       `<span class="chip ${a.level === "info" ? "amber" : a.level}">${a.text}</span>`).join("");
+    live(true);
     data.requests = o.requests || [];
     data.recycle = o.recycle || { gb: 0 };
     const [lib, subs] = await Promise.all([
@@ -101,10 +110,44 @@ async function load(force) {
       fetch("/subtitles", { cache: "no-store" }).then(r => r.json())]);
     data.library = lib.items || [];
     data.subs = subs.items || [];
-    $("#stamp").textContent = "atualizado " + new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     render(force);
-  } catch (e) { /* servidor fora: mantém a última tela, sem erro na cara do usuário */ }
+  } catch (e) { live(false); }   // servidor fora: ícone fica vermelho, tela mantém o último estado
   loading = false;
+}
+
+function barColor(pct) {
+  return pct >= 90 ? "var(--red)" : pct >= 80 ? "var(--amber)" : "var(--green)";
+}
+function tempColor(t) {
+  return t >= 80 ? "var(--red)" : t >= 70 ? "var(--amber)" : "var(--ink)";
+}
+function renderHeader(o) {
+  const d = o.disk || {}, h = o.host || {}, mem = h.mem || {}, cpu = h.cpu || {}, io = h.io || {};
+  const cont = (h.containers || {}).running;
+  const mb = (v) => (v / 1024).toFixed(1);
+  const parts = [
+    { label: "RAM", value: mem.total_mb ? `${mb(mem.used_mb)} / ${Math.round(mem.total_mb / 1024)} GB` : "—",
+      pct: mem.pct },
+    { label: "Disco", value: d.total_gb ? `${d.used_gb} / ${d.total_gb} GB` : "—", pct: d.pct },
+    { label: "CPU", value: cpu.pct != null ? Math.round(cpu.pct) + "%" : "—" },
+    { label: "Temp", value: h.temp_c != null ? Math.round(h.temp_c) + "°" : "—", color: h.temp_c != null ? tempColor(h.temp_c) : null },
+    { label: "IO", value: io.read_kbs != null ? `↓${Math.round(io.read_kbs)} ↑${Math.round(io.write_kbs)} kB/s` : "—" },
+    { label: "Contêineres", value: cont >= 0 ? String(cont) : "—" },
+  ];
+  $("#stats").innerHTML = parts.map(p => `
+    <div class="stat"><span>${p.label}</span>
+      <b style="${p.color ? "color:" + p.color : ""}">${p.value}</b>
+      ${p.pct != null ? `<div class="bar"><i style="width:${Math.min(100, p.pct)}%;background:${barColor(p.pct)}"></i></div>` : ""}
+    </div>`).join("");
+}
+function live(on) {
+  const el = $("#live");
+  el.classList.toggle("off", !on);
+  el.lastChild.textContent = on ? "ao vivo" : "offline";
+}
+function tickClock() {
+  const now = new Date();
+  $("#clock").textContent = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
 }
 
 let lastSig = "";
@@ -315,7 +358,8 @@ async function pollEvents() {
   } catch (e) {}
 }
 load();
-setInterval(load, 2000);         // status/progresso a cada 2 s
+tickClock(); setInterval(tickClock, 1000);   // relógio local, não depende do fetch
+setInterval(load, 2000);         // só os DADOS a cada 2 s (o relógio não é re-renderizado)
 setInterval(pollEvents, 2000);   // webhook do Radarr/Sonarr -> reflexo em até 2 s
 </script>
 </body>

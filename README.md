@@ -44,6 +44,13 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 A URL do painel já vem preenchida em `SetupActivity`.
 
+## Cabeçalho
+
+O topo mostra, além de disco e RAM: **CPU, temperatura, IO e contêineres** (do `severino-metrics`), com
+barras para RAM e disco. À direita, **relógio** (atualizado a cada segundo no cliente — os dados continuam a
+cada 2 s, sem re-renderizar o relógio) e um **indicador verde "ao vivo"** que fica vermelho/**offline** quando
+o painel não responde.
+
 ## Aba Legendas = catálogo
 
 A aba lista **todos os filmes da biblioteca** com as faixas que o arquivo realmente tem (embutidas e externas:

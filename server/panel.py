@@ -54,6 +54,7 @@ SEERR = CONF_VALUES.get("SEERR_URL", "http://127.0.0.1:5055")
 BAZARR = CONF_VALUES.get("BAZARR_URL", "http://127.0.0.1:6767")
 DISK_PATH = CONF_VALUES.get("DISK_PATH", "/DATA")
 RECYCLE = CONF_VALUES.get("RECYCLE_PATH", "/DATA/AppData/arr-stack/recycle")
+METRICS = CONF_VALUES.get("METRICS_URL", "http://127.0.0.1:9123/metrics")
 SUBTITLE_LANG = CONF_VALUES.get("SUBTITLE_LANG", "pb")   # Bazarr calls it "pb" (Portuguese, Brazil)
 SUBTITLE_MATCH = {"pb", "pt-br", "pt", "pob"}
 
@@ -346,6 +347,15 @@ def purge_recycle():
     return {"freed_gb": gb(freed)}
 
 
+def host_health():
+    """CPU, RAM, temperatura, IO e contêineres do severino-metrics."""
+    try:
+        with urllib.request.urlopen(METRICS, timeout=3) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
 def overview():
     return cached("overview", 2, _overview)
 
@@ -397,6 +407,7 @@ def _overview():
         alerts.append({"level": "info", "text": f"lixeira: {rec['gb']} GB — dá para esvaziar"})
     return {"disk": d, "alerts": alerts, "biggest": biggest, "library_gb": round(total_lib, 1),
             "recent": recent, "resume": resume, "recycle": rec,
+            "host": cached("host", 2, host_health) or {},
             "requests": requests().get("items", [])}
 
 
