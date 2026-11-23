@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Severino</title>
+<style>
+  :root { --bg:#0b1020; --card:#161d2f; --card2:#1d2539; --ink:#f2f4f8; --dim:#9aa3b5;
+          --accent:#818cf8; --green:#34c759; --amber:#ffb340; --red:#ff5147; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+              font:500 22px/1.35 -apple-system,"Segoe UI",Roboto,sans-serif; }
+  body { padding:42px 64px; }
+  header { display:flex; align-items:center; gap:26px; margin-bottom:26px; }
+  h1 { font-size:34px; font-weight:600; margin:0; letter-spacing:.5px; }
+  .disk { flex:1; max-width:640px; }
+  .bar { height:12px; border-radius:6px; background:#ffffff18; overflow:hidden; }
+  .bar > i { display:block; height:100%; border-radius:6px; background:var(--green); transition:width .4s; }
+  .row2 { display:flex; justify-content:space-between; font-size:17px; color:var(--dim); margin-top:8px; }
+  .alerts { display:flex; gap:12px; flex-wrap:wrap; }
+  .chip { padding:8px 16px; border-radius:999px; font-size:17px; }
+  .amber { background:#ffb34022; color:var(--amber); } .red { background:#ff514722; color:var(--red); }
+  .tabs { display:flex; gap:12px; margin:0 0 22px; }
+  .tab { padding:12px 26px; border-radius:12px; background:#ffffff0d; color:var(--dim);
+         border:2px solid transparent; font-size:20px; cursor:pointer; }
+  .tab.on { background:var(--card); color:var(--ink); border-color:var(--accent); }
+  .item { display:flex; align-items:center; gap:20px; padding:14px 20px; margin-bottom:10px;
+          background:var(--card); border-radius:14px; border:2px solid transparent; }
+  .item .t { flex:1; min-width:0; }
+  .item .t b { font-weight:600; }
+  .item .t small { display:block; color:var(--dim); font-size:16px; margin-top:2px; }
+  .pill { font-size:15px; padding:5px 12px; border-radius:999px; background:#ffffff14; color:var(--dim); }
+  .pill.ok { background:#34c75922; color:var(--green); } .pill.wait { background:#ffb34022; color:var(--amber); }
+  .pill.bad { background:#ff514722; color:var(--red); } .pill.dl { background:#818cf822; color:var(--accent); }
+  button.act { font:600 17px/1 inherit; padding:12px 18px; border-radius:10px; border:2px solid #ffffff26;
+               background:#ffffff0f; color:var(--ink); cursor:pointer; }
+  button.act.danger { border-color:#ff514766; color:#ffb4ae; }
+  button.act:focus, .item:focus, .tab:focus { outline:3px solid var(--accent); outline-offset:3px; }
+  .hold { position:relative; overflow:hidden; }
+  .hold .fill { position:absolute; inset:0; width:0; background:#ff514722; }
+  .empty { color:var(--dim); padding:26px 4px; }
+  #toast { position:fixed; left:50%; bottom:48px; transform:translateX(-50%) translateY(30px);
+           background:#222b40; padding:16px 26px; border-radius:12px; opacity:0; transition:.25s; }
+  #toast.on { opacity:1; transform:translateX(-50%); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Severino</h1>
+  <div class="disk">
+    <div class="bar"><i id="diskbar"></i></div>
+    <div class="row2"><span id="disktext">—</span><span id="uptime"></span></div>
+  </div>
+  <div class="alerts" id="alerts"></div>
+</header>
+
+<div class="tabs" id="tabs">
+  <button class="tab on" data-fkey="tab-requests" data-tab="requests">Pedidos</button>
+  <button class="tab" data-fkey="tab-library" data-tab="library">Biblioteca</button>
+  <button class="tab" data-fkey="tab-subs" data-tab="subs">Legendas</button>
+</div>
+<div id="list"></div>
+<div id="toast"></div>
+
+<script>
+const TOKEN = "__PANEL_TOKEN__";
+const H = { "X-Panel-Token": TOKEN, "Content-Type": "application/json" };
+let tab = "requests", data = { requests: [], library: [], subs: [] };
+
+const $ = s => document.querySelector(s);
+const toast = m => { const t = $("#toast"); t.textContent = m; t.classList.add("on");
+  clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove("on"), 2600); };
+const fmt = gb => (gb >= 10 ? Math.round(gb) : gb.toFixed(1)) + " GB";
+
+function pill(state) {
+  const s = (state || "").toLowerCase();
+  const cls = /dispon|importado|ok/.test(s) ? "ok" : /baixando|procurando|importando/.test(s) ? "dl"
+            : /aprov|fila/.test(s) ? "wait" : /recus|falh|erro/.test(s) ? "bad" : "";
+  return `<span class="pill ${cls}">${state || "—"}</span>`;
+}
+
+async function load() {
+  const o = await fetch("/overview").then(r => r.json());
+  const d = o.disk;
+  $("#diskbar").style.width = d.pct + "%";
+  $("#diskbar").style.background = d.pct >= 90 ? "var(--red)" : d.pct >= 80 ? "var(--amber)" : "var(--green)";
+  $("#disktext").textContent = `${fmt(d.used_gb)} de ${fmt(d.total_gb)} · ${fmt(d.free_gb)} livres · ${d.pct}%`;
+  $("#alerts").innerHTML = (o.alerts || []).map(a => `<span class="chip ${a.level === "info" ? "amber" : a.level}">${a.text}</span>`).join("");
+  data.requests = o.requests || [];
+  const lib = await fetch("/library").then(r => r.json());
+  data.library = lib.items || [];
+  const subs = await fetch("/subtitles").then(r => r.json());
+  data.subs = subs.items || [];
+  render();
+}
+
+function render() {
+  const keep = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.fkey : null;
+  const l = $("#list");
+  if (tab === "requests") {
+    l.innerHTML = data.requests.length ? data.requests.map(r => `
+      <div class="item" tabindex="0" data-fkey="req-${r.id}">
+        <div class="t"><b>${r.title}</b>
+          <small>${r.type === "tv" ? "série" : "filme"}${r.pct != null ? " · " + r.pct + "%" : ""}${r.eta ? " · faltam " + r.eta : ""}${r.error ? " · " + r.error : ""}</small>
+        </div>${pill(r.state)}</div>`).join("") : `<div class="empty">nenhum pedido</div>`;
+  } else if (tab === "library") {
+    l.innerHTML = data.library.length ? data.library.map(i => `
+      <div class="item" tabindex="0" data-fkey="lib-${i.id}">
+        <div class="t"><b>${i.title}</b><small>${i.kind === "movie" ? "filme" : "série"} · ${i.year || ""}</small></div>
+        <span class="pill">${fmt(i.size_gb)}</span>
+        <button class="act danger hold" data-fkey="del-${i.id}" data-kind="${i.kind}" data-id="${i.id}">Segure: excluir</button>
+      </div>`).join("") : `<div class="empty">biblioteca vazia</div>`;
+  } else {
+    l.innerHTML = data.subs.length ? data.subs.map(x => `
+      <div class="item" tabindex="0" data-fkey="sub-${x.id}">
+        <div class="t"><b>${x.title}</b><small>${x.year || ""} · sem ${x.missing.join(", ")}</small></div>
+        <button class="act hold" data-fkey="subact-${x.id}" data-sub="${x.id}">Segure: buscar</button>
+      </div>`).join("") : `<div class="empty">todas as legendas em dia</div>`;
+  }
+  const again = keep ? document.querySelector(`[data-fkey="${keep}"]`) : null;
+  (again || l.querySelector(".item") || document.querySelector(".tab.on")).focus();
+}
+
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
+  t.classList.add("on"); tab = t.dataset.tab; render();
+});
+
+// Segurar OK por 1,5 s executa a ação (excluir / buscar legenda).
+function bindHold(el, run) {
+  let t = null, done = false;
+  const start = () => { done = false; el.style.background = "#ff514733";
+    t = setTimeout(async () => { done = true; el.style.background = ""; await run(); }, 1500); };
+  const cancel = () => { clearTimeout(t); if (!done) el.style.background = ""; };
+  el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); start(); } });
+  el.addEventListener("keyup", e => { if (e.key === "Enter" || e.key === " ") cancel(); });
+  el.addEventListener("blur", cancel);
+  el.addEventListener("mousedown", start); el.addEventListener("mouseup", cancel); el.addEventListener("mouseleave", cancel);
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button.act"); if (!b) return;
+});
+function navRows() {
+  const rows = [];
+  const tabs = [...document.querySelectorAll(".tab")].filter(x => x.offsetParent);
+  if (tabs.length) rows.push(tabs);
+  document.querySelectorAll(".item").forEach(it => {
+    const row = [it];
+    const btn = it.querySelector("button.act");
+    if (btn && btn.offsetParent) row.push(btn);
+    rows.push(row);
+  });
+  return rows;
+}
+
+function nav(dir) {
+  const rows = navRows();
+  const flat = rows.flat();
+  let ri = rows.findIndex(r => r.includes(document.activeElement));
+  if (ri < 0) { (rows[0] || [])[0]?.focus(); return; }
+  const ci = rows[ri].indexOf(document.activeElement);
+  if (dir === "right") { if (ci < rows[ri].length - 1) rows[ri][ci + 1].focus(); }
+  else if (dir === "left") { if (ci > 0) rows[ri][ci - 1].focus(); }
+  else if (dir === "down") { rows[ri + 1]?.[0]?.focus(); }
+  else if (dir === "up") { rows[ri - 1]?.[0]?.focus(); }
+  // se o foco não se moveu (fim de linha), tenta a linha vizinha na vertical
+  if (document.activeElement === flat[flat.indexOf(document.activeElement)]) return;
+}
+
+function activate() {
+  const el = document.activeElement;
+  if (!el) return;
+  if (el.classList.contains("tab") || el.tagName === "BUTTON") { el.click(); return; }
+  el.click();
+}
+
+// A ponte do wrapper WebView (WebActivity.dispatchKeyEvent) consome as setas e chama isto.
+window.__seerrNav = function (cmd) {
+  try {
+    if (cmd === "enter") { activate(); return "click"; }
+    if (cmd === "back") { if (history.length > 1) history.back(); return "goback"; }
+    nav(cmd); return "move";
+  } catch (e) { return "err"; }
+};
+
+// Browsers (TV Bro) mandam keydown de verdade.
+document.addEventListener("keydown", e => {
+  const map = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+  if (map[e.key]) { nav(map[e.key]); e.preventDefault(); return; }
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); }
+});
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button.act"); if (!b) return;
+});
+document.addEventListener("keydown", e => {
+  const key = e.key;
+  if (!/^Arrow/.test(key)) return;
+  // Agrupa os focáveis em linhas: a barra de abas é uma; cada item, uma.
+  const rows = [];
+  const tabs = [...document.querySelectorAll(".tab")].filter(x => x.offsetParent);
+  if (tabs.length) rows.push(tabs);
+  document.querySelectorAll(".item").forEach(it => {
+    const row = [it];
+    const btn = it.querySelector("button.act");
+    if (btn && btn.offsetParent) row.push(btn);
+    rows.push(row);
+  });
+  const flat = rows.flat();
+  let i = flat.indexOf(document.activeElement);
+  if (i < 0) { (rows[0] || [])[0]?.focus(); e.preventDefault(); return; }
+  let ri = rows.findIndex(r => r.includes(document.activeElement));
+  let ci = rows[ri].indexOf(document.activeElement);
+  if (key === "ArrowRight") { if (ci < rows[ri].length - 1) rows[ri][ci + 1].focus(); }
+  else if (key === "ArrowLeft") { if (ci > 0) rows[ri][ci - 1].focus(); }
+  else if (key === "ArrowDown") { const n = rows[ri + 1]; if (n) n[0].focus(); }
+  else if (key === "ArrowUp") { const p = rows[ri - 1]; if (p) p[0].focus(); }
+  e.preventDefault();
+});
+
+async function act(kind, id, btn) {
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    if (kind === "delete") {
+      const r = await fetch("/delete", { method: "POST", headers: H, body: JSON.stringify({ kind: btn.dataset.kind, id, files: true }) });
+      if (!r.ok) throw new Error((await r.json()).error || r.status);
+      toast("excluído — espaço liberado"); await load(); return;
+    }
+    const r = await fetch("/subtitles/search", { method: "POST", headers: H, body: JSON.stringify({ kind: "movie", id }) });
+    if (!r.ok) throw new Error((await r.json()).error || r.status);
+    toast("busca de legenda enviada"); await load(); return;
+  } catch (err) { toast("erro: " + err.message); btn.disabled = false; btn.textContent = "tentar de novo"; }
+}
+
+const observer = new MutationObserver(() => {
+  document.querySelectorAll("button.act.danger").forEach(b => {
+    if (b.dataset.bound) return; b.dataset.bound = "1";
+    bindHold(b, () => act("delete", Number(b.dataset.id), b));
+  });
+  document.querySelectorAll("button.act[data-sub]").forEach(b => {
+    if (b.dataset.bound) return; b.dataset.bound = "1";
+    bindHold(b, () => act("sub", Number(b.dataset.sub), b));
+  });
+});
+observer.observe($("#list"), { childList: true, subtree: true });
+
+load(); setInterval(load, 30000);
+</script>
+</body>
+</html>

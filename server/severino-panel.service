@@ -1,0 +1,16 @@
+[Unit]
+Description=Severino panel (media API for the TV)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/severino-panel/panel.py
+EnvironmentFile=/etc/severino-panel/keys.env
+Environment=PORT=9124
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
