@@ -174,11 +174,23 @@ def requests():
         d = seerr("/api/v1/request?take=40&sort=added")
     except Exception as e:
         return {"error": str(e), "items": []}
-    qs = queue("movie") + queue("series")
-    by_tmdb = {}
-    for q in qs:
-        if q.get("tmdb"):
-            by_tmdb.setdefault(q["tmdb"], []).append(q)
+    # A fila do Radarr/Sonarr traz o id local (movieId/seriesId), não o TMDB: monta os dois sentidos.
+    local = {}
+    try:
+        for m in movies():
+            if m.get("tmdb"):
+                local[("movie", m["tmdb"])] = m["id"]
+        for s in series():
+            if s.get("tmdb"):
+                local[("series", s["tmdb"])] = s["id"]
+    except Exception:
+        pass
+    by_id = {}
+    for q in queue("movie") + queue("series"):
+        if q["kind"] == "movie" and q.get("radarr_id") is not None:
+            by_id[("movie", q["radarr_id"])] = q
+        elif q["kind"] == "series" and q.get("sonarr_id") is not None:
+            by_id[("series", q["sonarr_id"])] = q
     out = []
     for r in (d or {}).get("results", []):
         media = r.get("media") or {}
@@ -186,7 +198,7 @@ def requests():
         mt = (media.get("mediaType") or "movie")
         title = media.get("title") or media.get("name") or media.get("originalTitle") or seerr_title(tmdb, mt)
         state, pct, eta, size, err = None, None, None, None, None
-        q = (by_tmdb.get(tmdb) or [None])[0]
+        q = by_id.get((mt, local.get((mt, tmdb))))
         if q:
             state = RADARR_Q.get(q["state"], q["state"])
             pct, eta, size, err = q["pct"], q["timeleft"], q["sizeleft_gb"], q["error"]
@@ -349,11 +361,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.partition("?")[0]
         try:
-            if path == "/hook/radarr":   # sem token: é o webhook do Radarr, na própria máquina
+            if path in ("/hook/radarr", "/hook/sonarr"):   # webhooks, na própria máquina
                 b = self._body()
-                if b.get("eventType") in ("Download", "Test"):
+                if b.get("eventType") in ("Download", "Test", "Grab"):
                     media = b.get("movie") or b.get("series") or {}
-                    add_event("download", media.get("title") or b.get("movie", {}).get("folderName") or "novo título")
+                    title = media.get("title") or b.get("movie", {}).get("folderName") \
+                        or b.get("series", {}).get("title") or "novo título"
+                    add_event("grab" if b.get("eventType") == "Grab" else "download", title)
                 return self._send(200, {"ok": True})
             if not self._token_ok():
                 return self._send(403, {"error": "token"})

@@ -44,6 +44,14 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 A URL do painel já vem preenchida em `SetupActivity`.
 
+## Atualização
+
+- A página recarrega a cada **10 s** (progresso/ETA vêm da fila do Radarr/Sonarr).
+- **Webhooks**: Radarr e Sonarr → `http://<pi>:9124/hook/radarr|sonarr` (eventos `Grab` e `Download`).
+  A página escuta `/events` a cada 5 s e recarrega na hora — "começou a baixar" e "ficou disponível"
+  aparecem em até ~5 s, sem esperar o polling.
+- O progresso em si não é push (o Radarr não emite evento por %), por isso o polling de 10 s.
+
 ## Ações destrutivas
 
 Excluir e buscar legenda exigem **segurar OK por 1,5 s**. O `PANEL_TOKEN` vai embutido na página servida (LAN),

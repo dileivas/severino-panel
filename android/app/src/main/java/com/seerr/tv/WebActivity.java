@@ -416,7 +416,12 @@ public class WebActivity extends AppCompatActivity {
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:
-                if (action == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) navEnter();
+                // The panel needs both edges: DOWN starts a "hold", UP releases it (or taps).
+                if (action == KeyEvent.ACTION_DOWN) {
+                    if (event.getRepeatCount() == 0) nav("press");
+                } else {
+                    nav("release");
+                }
                 return true;
 
             case KeyEvent.KEYCODE_BACK:
