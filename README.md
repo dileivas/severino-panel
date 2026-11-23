@@ -96,6 +96,17 @@ tamanho e oferece "Segure: esvaziar" (13,8 GB liberados na primeira vez). `RECYC
   aparecem em até ~5 s, sem esperar o polling.
 - O progresso em si não é push (o Radarr não emite evento por %), por isso o polling de 10 s.
 
+## Identidade visual
+
+| Peça | Especificação |
+|---|---|
+| `android:banner` (tile da TV) | 320×180 dp → `drawable-xhdpi` 640×360, `-xxhdpi` 960×540, `-xxxhdpi` 1280×720 |
+| `android:icon` | mipmap mdpi 48 · hdpi 72 · xhdpi 96 · xxhdpi 144 · xxxhdpi 192 (+ `ic_launcher_round`) |
+| Logo in-app | `server/logo.png` servido em `/logo.png`, 256 px com transparência |
+
+O ícone é um "rack" de três barras (índigo→ciano) com LED. Para o tile do Free My TV mostrar o logo
+grande, o launcher precisa de `assets/logos/severino.png` (ver o fork `free-my-tv`, branch `firetv-support`).
+
 ## Ações destrutivas
 
 Excluir e buscar legenda exigem **segurar OK por 1,5 s**. O `PANEL_TOKEN` vai embutido na página servida (LAN),
